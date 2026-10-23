@@ -95,6 +95,14 @@ export interface Selection {
   reason: string;
 }
 
+/** A ladder answer PLUS what the rung-1 e2e gate actually did (#1010). Recorded because the gate
+ *  PASSES when the host was never provisioned with `MERCURY_API_URL`/`MERCURY_API_TOKEN`, and
+ *  "passed" and "never checked" used to be the same value: a permanently permissive gate looked
+ *  exactly like a healthy one. */
+export interface SelectionReport extends Selection {
+  e2eGate: E2eGateState;
+}
+
 /**
  * One open nightly PR with pending review remarks (#819): the resume rung's input. GitHub
  * metadata only - number, head, branch, the last Copilot review's head and state - never PR
@@ -381,11 +389,15 @@ async function ghPost(path: string, body: unknown, token: string): Promise<boole
  * URL/token) fails closed — a half-set gate is a misconfiguration, not an absence. A fully
  * configured gate that cannot be evaluated (unreachable host, bad token, non-2xx) also fails
  * CLOSED: rung 1 does not start on a guess. */
-export async function e2eRunTerminal(env: NodeJS.ProcessEnv): Promise<boolean> {
+export type E2eGateState = 'configured' | 'absent' | 'half-configured' | 'unevaluable';
+
+/** The gate's ANSWER and its STATE. The boolean alone cannot distinguish "tonight's e2e Run is
+ * terminal" from "nothing was checked, because the host never supplied the two variables" (#1010). */
+export async function e2eGate(env: NodeJS.ProcessEnv): Promise<{ terminal: boolean; state: E2eGateState }> {
   const url = env.MERCURY_API_URL;
   const token = env.MERCURY_API_TOKEN;
-  if (!url && !token) return true; // no gate configured at all
-  if (!url || !token) return false; // half-configured: fail closed
+  if (!url && !token) return { terminal: true, state: 'absent' }; // no gate configured at all
+  if (!url || !token) return { terminal: false, state: 'half-configured' }; // fail closed
   try {
     // Walk the run list with the same paged discipline the bot scheduler uses: a long-lived
     // non-terminal nightly-e2e Run can age out of page one, and missing it would pass the gate
@@ -401,7 +413,7 @@ export async function e2eRunTerminal(env: NodeJS.ProcessEnv): Promise<boolean> {
         headers: { authorization: `Bearer ${token}` },
         signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
       });
-      if (!res.ok) return false; // configured but unevaluable: fail closed
+      if (!res.ok) return { terminal: false, state: 'unevaluable' }; // configured but unevaluable: fail closed
       const body = (await res.json()) as { runs?: { task?: string; status?: string }[]; nextCursor?: string | null };
       for (const r of body.runs ?? []) {
         if ((r.task ?? '').includes('nightly-e2e')) {
@@ -414,14 +426,19 @@ export async function e2eRunTerminal(env: NodeJS.ProcessEnv): Promise<boolean> {
       cursor = next;
       if (page === 19) {
         // Cap hit with MORE pages beyond: tonight's e2e Run could be on any of them.
-        return false; // fail closed
+        return { terminal: false, state: 'unevaluable' }; // fail closed
       }
     }
-    if (found === 0) return true; // reached the list end: no e2e Run tonight, nothing to wait for
-    return nonTerminal === 0;
+    if (found === 0) return { terminal: true, state: 'configured' }; // list end: no e2e Run tonight
+    return { terminal: nonTerminal === 0, state: 'configured' };
   } catch {
-    return false; // configured but unreachable: fail closed
+    return { terminal: false, state: 'unevaluable' }; // configured but unreachable: fail closed
   }
+}
+
+/** The boolean half of `e2eGate`, kept for the ladder (which only needs the answer). */
+export async function e2eRunTerminal(env: NodeJS.ProcessEnv): Promise<boolean> {
+  return (await e2eGate(env)).terminal;
 }
 
 /**
@@ -516,7 +533,7 @@ export async function runSelectorWith(
   },
   env: NodeJS.ProcessEnv,
   dryRun: boolean,
-): Promise<Selection> {
+): Promise<SelectionReport> {
   const repo = env.REPO ?? '';
   // REPO is interpolated into API paths for reads AND label writes: validate it with the shared
   // strict assertRepo (#769) so no path or query injection is possible and every nightly script
@@ -618,7 +635,8 @@ export async function runSelectorWith(
     candidates.push({ issue: effectiveIssue, readyByTrusted, e2eByNightly, enhByTrusted });
     if (claimTonightAt !== null) claimedTonight.push({ number: issue.number, claimedAt: claimTonightAt });
   }
-  const e2eTerminal = await e2eRunTerminal(env);
+  const gate = await e2eGate(env);
+  const e2eTerminal = gate.terminal;
   // Resume candidates (#819): open PRs authored by the nightly identity whose branch names an
   // open issue (fix/issue-<N>-*). Metadata only: head sha, branch, created_at, the LAST
   // Copilot review's (head, state) on the PR, and the COUNT of Copilot review comments bound
@@ -657,7 +675,7 @@ export async function runSelectorWith(
       // A failed or capped scan means the nightly-PR state is UNKNOWN, not absent: treating it
       // as absent would let the night double-claim an issue that already has a PR (#820 r2,
       // blocker 1). Abort selection: nothing is claimed tonight; the next Run retries.
-      return { rung: 'none', reason: 'selection aborted: the open-nightly-PR scan is incomplete (pagination cap or transport failure); claiming new work now could duplicate an existing PR' };
+      return { rung: 'none', reason: 'selection aborted: the open-nightly-PR scan is incomplete (pagination cap or transport failure); claiming new work now could duplicate an existing PR', e2eGate: gate.state };
     }
     {
       const openIssues = new Map(candidates.map((c) => [c.issue.number, c]));
@@ -702,7 +720,7 @@ export async function runSelectorWith(
       if (unmapped.length > 0) {
         if (!io.postJson) {
           console.error(`resume scan: ${unmapped.length} nightly PR(s) have an unmapped branch and postJson is missing; aborting selection (#847)`);
-          return { rung: 'none', reason: 'selection aborted: nightly PRs with an unmapped branch exist and the closing-reference query is unavailable; claiming new work now could duplicate an existing PR' };
+          return { rung: 'none', reason: 'selection aborted: nightly PRs with an unmapped branch exist and the closing-reference query is unavailable; claiming new work now could duplicate an existing PR', e2eGate: gate.state };
         }
         const aliases = unmapped
           .map((pr, idx) => `p${idx}: pullRequest(number: ${pr.number}) { closingIssuesReferences(first: 5) { pageInfo { hasNextPage } nodes { number state } } }`)
@@ -754,7 +772,7 @@ export async function runSelectorWith(
           console.error(`resume scan: closing-references query failed: ${String(e instanceof Error ? e.message : e)}`);
         }
         if (!mapped) {
-          return { rung: 'none', reason: 'selection aborted: the closing-reference mapping for nightly PRs with unmapped branches failed; claiming new work now could duplicate an existing PR' };
+          return { rung: 'none', reason: 'selection aborted: the closing-reference mapping for nightly PRs with unmapped branches failed; claiming new work now could duplicate an existing PR', e2eGate: gate.state };
         }
       }
       // Every chosen PR reserves its issue from rungs 1-3 - before any review read (#820 r2):
@@ -955,10 +973,10 @@ export async function runSelectorWith(
       pendingReviewIssues: new Set([...pendingReviewIssues].filter((n) => !failedIssues.has(n))),
     }, seen);
   }
-  return selection;
+  return { ...selection, e2eGate: gate.state };
 }
 
-export async function runSelector(repo: string, env: NodeJS.ProcessEnv, dryRun: boolean): Promise<Selection> {
+export async function runSelector(repo: string, env: NodeJS.ProcessEnv, dryRun: boolean): Promise<SelectionReport> {
   const token = ghToken(env);
   return runSelectorWith(
     {

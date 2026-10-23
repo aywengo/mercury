@@ -38,7 +38,7 @@
 import { basename } from 'node:path';
 
 import { checkModel, defaultApiKey, defaultEndpoint, resolveTaskModel, type ModelCheck } from './model.ts';
-import { runSelectorWith } from './select.ts';
+import { runSelectorWith, type E2eGateState } from './select.ts';
 import { assertRepo, ghToken, ghGet, ghPost, ghPatch, recordRunClaim, recordRunTerminal, FETCH_TIMEOUT_MS } from './shared.ts';
 
 const L_IN_PROGRESS = 'nightly:in-progress';
@@ -80,6 +80,9 @@ export interface NextSelection {
   /** What the AGENT (the Run) does next, per SKILL.md: run the issue-fix-loop on the claimed
    * issue, draft `nightly:proposed` issues from the docs (§6), or do nothing. */
   action: 'fix-loop' | 'draft-proposals' | 'no-op';
+  /** What the rung-1 e2e gate did (#1010): 'absent' means the host never supplied
+   *  `MERCURY_API_URL`/`MERCURY_API_TOKEN`, so rung 1 started without tonight's e2e verdict. */
+  e2eGate: E2eGateState;
 }
 
 /**
@@ -181,7 +184,7 @@ export async function runNext(io: NextIo, env: NodeJS.ProcessEnv, opts: RunNextO
   if (selection.rung === 4) {
     return { ...selection, action: 'draft-proposals' };
   }
-  return { rung: 'none', reason: selection.reason, action: 'no-op' };
+  return { rung: 'none', reason: selection.reason, action: 'no-op', e2eGate: selection.e2eGate };
 }
 
 /** The success exit path: the fix-loop finished (PR open/merged, or nothing actionable).
@@ -476,7 +479,18 @@ if (isMain) {
     throw new Error('usage: next.ts run|finish|blocked|propose --repo <owner/name> [--dry-run] [--issue <n>] [--reason "..."] [--source <doc#anchor>] [--title "..."] [--body-file <path>]');
   })();
   work
-    .then((out) => { process.stdout.write(JSON.stringify(out) + '\n'); })
+    .then((out) => {
+      // The gate's STATE is printed next to its answer (#1010). The boolean alone cannot tell a
+      // provisioned host from an unprovisioned one, so an absent gate was invisible in the Run's
+      // events for as long as nobody compared the host's environment to the docs.
+      const gate = (out as { e2eGate?: string }).e2eGate;
+      if (gate === 'absent') {
+        console.error('e2e gate: absent — MERCURY_API_URL/MERCURY_API_TOKEN are not in this Run\'s environment, so rung 1 is NOT gated on tonight\'s e2e verdict (docs/operations.md §"Running the nightly bot", #1010)');
+      } else if (gate === 'half-configured' || gate === 'unevaluable') {
+        console.error(`e2e gate: ${gate} — the gate is configured but could not be evaluated; rung 1 fails closed`);
+      }
+      process.stdout.write(JSON.stringify(out) + '\n');
+    })
     .catch((e: unknown) => {
       // The preflight record goes to STDOUT as the one JSON line, so a failed night leaves a
       // machine-readable reason next to the human message (#1040).
