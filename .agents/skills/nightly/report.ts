@@ -12,10 +12,13 @@
  *   - Runs stopped by `notAfter` (the §4.3 window end 06:00 local) — optional section, only when
  *     `MERCURY_REPORT_API_URL` + `MERCURY_REPORT_TOKEN` are set; the Mercury runs API is read
  *     for TIMED_OUT runs and their `run.timed_out` reason event.
+ *   - Runs that failed (#1042) — same optional source: FAILED runs created during the night, with
+ *     their first error line (redacted). A model outage ends Runs before they do anything, so
+ *     without this section a lost night reads as `_none_` everywhere.
  *   - Flakes: the nightly-e2e flake clock (same state file) — recent fingerprint nights.
  *
  * Output: exactly one JSON line
- * `{ night, issue, closedPrevious, prs, issuesFiled, issuesCommented, claimsReleased, blocked, runsStopped, flakes }`.
+ * `{ night, issue, closedPrevious, prs, issuesFiled, issuesCommented, claimsReleased, blocked, runsStopped, runsFailed, flakes }`.
  * No dependencies; all I/O injectable. Writes: the digest issue itself and the close of
  * every OPEN digest titled `nightly report — D` with D strictly BEFORE the report night - one
  * rule that self-heals failed closes on any later night and can never erase a newer report.
@@ -25,6 +28,8 @@
  */
 
 import { basename } from 'node:path';
+
+import { redactText } from './e2e.ts';
 import { loadFlakeState, normalizeTestName } from './e2e.ts';
 import { assertRepo, CLAIM_RELEASED_MARKER, localDateString, nextDay, prevDay, ghGet, ghPost, ghPatch, ghToken, loadRunLedger, FETCH_TIMEOUT_MS } from './shared.ts';
 
@@ -81,6 +86,9 @@ export interface ReportData {
   claimsReleased: { number?: number }[];
   blocked: { number?: number; title: string; question?: string }[];
   runsStopped: { runId?: string; task?: string; status?: string }[];
+  /** FAILED Runs of the night (#1042): a model outage ends Runs before they do anything, and a
+   * digest that lists only timed-out Runs reports a lost night as `_none_`. */
+  runsFailed: { runId?: string; task?: string; status?: string; error?: string }[];
   /** #1024: Runs that committed and never pushed, with the worktree to recover from. */
   unpushedCommits: { runId: string; branch?: string; commits: string[]; workspacePath?: string }[];
   /** #1024: nightly-next Runs that claimed work and never called `finish`/`blocked`. */
@@ -374,6 +382,53 @@ export async function collectRunsStopped(mercury: NonNullable<ReportIo['mercury'
     path = body.nextCursor ? `/api/runs?status=TIMED_OUT&limit=100&cursor=${encodeURIComponent(body.nextCursor)}` : undefined;
   }
   return out;
+}
+
+/**
+ * The Runs that FAILED during `night` (#1042). Cheap on purpose: the failure reason is already on
+ * the Run row (`error`), so this is one listing scan and no per-run event walk -- a night that
+ * fails 17 Runs must not cost 17 event reads in the report that describes it.
+ *
+ * The night is matched on the Run's LOCAL createdAt: the report's night is a local date, and a Run
+ * created at 23:50 local is part of that night even when its UTC date differs.
+ */
+export async function collectFailedRuns(
+  mercury: NonNullable<ReportIo['mercury']>,
+  night: string,
+): Promise<{ runId?: string; task?: string; status?: string; error?: string }[]> {
+  const out: { runId?: string; task?: string; status?: string; error?: string }[] = [];
+  let path: string | undefined = '/api/runs?status=FAILED&limit=100';
+  for (let page = 0; page < 10 && path; page++) {
+    let res: Awaited<ReturnType<typeof mercury.get>>;
+    try {
+      res = await mercury.get(path);
+    } catch {
+      return out; // best-effort, like every other Mercury section
+    }
+    if (res.status < 200 || res.status >= 300) return out;
+    const body = res.body as {
+      runs?: { id?: string; task?: string; status?: string; error?: string | null; createdAt?: string }[];
+      nextCursor?: string;
+    } | null;
+    if (body === null || typeof body !== 'object' || !Array.isArray(body.runs)) return out;
+    for (const run of body.runs) {
+      if (!run.id) continue;
+      const created = run.createdAt ? new Date(run.createdAt) : null;
+      if (created === null || Number.isNaN(created.getTime())) continue;
+      if (localDateString(created) !== night) continue;
+      out.push({ runId: run.id, task: run.task, status: run.status, error: firstLine(run.error) });
+    }
+    path = body.nextCursor ? `/api/runs?status=FAILED&limit=100&cursor=${encodeURIComponent(body.nextCursor)}` : undefined;
+  }
+  return out;
+}
+
+/** One line, bounded: an adapter error can be a paragraph, and the digest is a list. */
+function firstLine(error: string | null | undefined): string | undefined {
+  if (typeof error !== 'string') return undefined;
+  const line = error.split('\n')[0].trim();
+  if (line === '') return undefined;
+  return line.length > 300 ? `${line.slice(0, 297)}...` : line;
 }
 
 /** The nightly procedure whose version the header compares: the one whose staleness has already
@@ -831,6 +886,13 @@ function digestBody(night: string, data: ReportData, note?: string): string {
     bounded(data.blocked.map((b) => `- #${b.number} ${escMd(b.title)}${b.question ? ` — question: ${escMd(b.question)}` : ''}`), '_none_'));
   section('## Runs stopped by notAfter (the 06:00 window end)', () =>
     bounded(data.runsStopped.map((r) => `- ${codeSpan(r.runId ?? '')} — ${codeSpan(r.task ?? '')}`), '_none_'));
+  // #1042: a model outage fails Runs without producing a PR, a comment or a claim release, so the
+  // sections above all said `_none_` and the night looked quiet. This one names them.
+  section('## Runs that failed', () =>
+    bounded(data.runsFailed.map((r) => {
+      const reason = r.error ? ` — ${escMd(redactText(r.error))}` : '';
+      return `- ${codeSpan(r.runId ?? '')} — ${codeSpan(r.task ?? '')}${reason}`;
+    }), '_none_'));
   section('## Flakes (nightly-e2e clock)', () => {
     const flakeLines = data.flakes.map((f) => {
       // State-derived text: flatten newlines BEFORE other rendering so a tampered entry or a
@@ -922,6 +984,7 @@ export async function runReport(
   const claimsReleased = await collectClaimsReleased(io, opts.repo, win.startMs, win.endMs - 1000);
   const blocked = await collectBlocked(io, opts.repo);
   const runsStopped = io.mercury ? await collectRunsStopped(io.mercury, opts.night) : [];
+  const runsFailed = io.mercury ? await collectFailedRuns(io.mercury, opts.night) : [];
   // #1024: one pass over the night's Runs feeds both the unpushed-commit section and the
   // loaded-skill header. Without the Mercury API neither is knowable, and neither is faked.
   const nightRuns = io.mercury ? await scanNightRuns(io.mercury, opts.night, { repo: opts.repo }) : [];
@@ -941,7 +1004,7 @@ export async function runReport(
   // #964: the digest shows the last FLAKE_REPORT_WINDOW_NIGHTS nights and only counts the rest.
   const { visible: flakes, older: flakesOlder } = flakesInWindow(collectFlakes(env, opts.night), opts.night);
   const data: ReportData = {
-    prs, issuesFiled, issuesCommented, claimsReleased, blocked, runsStopped,
+    prs, issuesFiled, issuesCommented, claimsReleased, blocked, runsStopped, runsFailed,
     unpushedCommits, runsWithoutTerminalCall, ...(skillVersions ? { skillVersions } : {}),
     flakes, flakesOlder,
   };
