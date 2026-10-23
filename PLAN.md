@@ -221,6 +221,7 @@ on Mercury's own Express app, so A1 can start.
 | #1042 | nightly report: a model outage makes the digest say _none_ everywhere, so a lost night reads as a quiet one | done | #1043 |
 | #1018 | nightly: rung 4 files nothing — the dedupe list walk caps at 10 pages (1000 items) and the repo has outgrown it | done | #1048 |
 | #1010 | nightly: the rung-1 e2e gate is permanently permissive because MERCURY_API_URL/TOKEN are never provisioned | done | #1049 |
+| #1051 | release: the workflow fails at checkout because the OPERATOR_PAT secret does not exist | in progress | #1052 |
 
 ## Security follow-ups
 

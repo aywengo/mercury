@@ -227,6 +227,13 @@ previous version (#1029, on `host-v0.2.3`). The release job therefore checks out
 `secrets.OPERATOR_PAT`, so the persisted git credential is the bypass identity. If that secret is absent or
 lacks bypass, the formula step fails loudly and names the version Homebrew is still serving.
 
+**`OPERATOR_PAT` is a release precondition, and its absence is not fatal to the rest.** The checkout falls
+back to the `GITHUB_TOKEN` when the secret is unset, because `actions/checkout` refuses an empty `token`
+input and a release that dies at step 1 ships nothing at all — worse than a stale formula (#1051). With the
+fallback the release, its assets and the npm stage still run, the body discloses the Homebrew gap, and the
+log carries `::warning::OPERATOR_PAT is not set`. Set the secret before cutting a release you expect
+Homebrew to serve.
+
 ### Testing trusted publishing without publishing anything
 
 The exchange probe on a normal rehearsal holds a **branch**-subject token, so it cannot tell you what a tag
