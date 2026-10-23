@@ -256,7 +256,10 @@ function runTag(
       + '    printf "%s" "$body"; exit "$code" ;;\n'
       // The tap is public too, and the release body now checks it before naming Homebrew as an
       // install path. Default 404, because that is what the tap actually returns today.
-      + '  *raw.githubusercontent.com*) if [ -n "${wfmt:-}" ]; then printf "%s" "${STUB_FORMULA_HTTP:-200}"; exit 0; fi; exit 22 ;;\n'
+      // A real failed curl prints `000` from -w AND exits nonzero, so the stub must do both:
+      // with `exit 0` a `|| echo 000` fallback never fires, which is how the doubled value
+      // in #1045 went unseen by the suite that exists to pin this text.
+      + '  *raw.githubusercontent.com*) if [ -n "${wfmt:-}" ]; then printf "%s" "${STUB_FORMULA_HTTP:-200}"; case "${STUB_FORMULA_HTTP:-200}" in 000) exit 7;; esac; exit 0; fi; exit 22 ;;\n'
       // Package metadata is public, and the failure classifier now reads it to tell a rejected
       // publisher apart from a package that has never existed. STUB_PKG_HTTP is that answer.
       // A VERSION url (…/<pkg>/<semver>) must be answerable separately from the package url: whether
@@ -271,9 +274,12 @@ function runTag(
       + '    n=0; [ -f "' + tmp + '/vprobe.count" ] && n=$(cat "' + tmp + '/vprobe.count");\n'
       + '    n=$((n+1)); printf "%s" "$n" > "' + tmp + '/vprobe.count";\n'
       + '    if [ -n "${STUB_PKG_VERSION_HTTP_AFTER:-}" ] && [ "$n" -gt "${STUB_PKG_VERSION_HTTP_AFTER}" ]; then\n'
+      // A real failed curl prints `000` from -w AND exits nonzero, so the stub must do both: with
+      // `exit 0` a `|| echo 000` fallback never fires, which is how the doubled value in #1045 went
+      // unseen by the suite that exists to pin this text.
       + '      printf "%s" "${STUB_PKG_VERSION_HTTP_LATE:-200}"; exit 0; fi\n'
-      + '    printf "%s" "${STUB_PKG_VERSION_HTTP:-404}"; exit 0; fi; exit 22 ;;\n'
-      + '  *) if [ -n "${wfmt:-}" ]; then printf "%s" "${STUB_PKG_HTTP:-200}"; exit 0; fi; exit 22 ;;\n'
+      + '    printf "%s" "${STUB_PKG_VERSION_HTTP:-404}"; case "${STUB_PKG_VERSION_HTTP:-404}" in 000) exit 7;; esac; exit 0; fi; exit 22 ;;\n'
+      + '  *) if [ -n "${wfmt:-}" ]; then printf "%s" "${STUB_PKG_HTTP:-200}"; case "${STUB_PKG_HTTP:-200}" in 000) exit 7;; esac; exit 0; fi; exit 22 ;;\n'
       + 'esac\nexit 0\n');
     chmodSync(curlStub, 0o755);
 
