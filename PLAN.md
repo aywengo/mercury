@@ -215,7 +215,7 @@ on Mercury's own Express app, so A1 can start.
 | #988 | Server-stamped Run origin: a field no request body can set (A0-3) | done | #996 |
 | #990 | Pure Run-chain → A2A TaskState mapping, exhaustive over RunStatus (A0-4) | done | #998 |
 | #989 | Exposed-skill config, create-Run validation of every template, `host a2a validate` (A0-5) | open | — |
-| #1030 | test: a2aServer section 6.6 blocking-bound test is timing-flaky and can block a release PR | open | — |
+| #1030 | test: a2aServer section 6.6 blocking-bound test is timing-flaky and can block a release PR | done | #1039 |
 
 ## Security follow-ups
 
