@@ -394,6 +394,16 @@ the host, the identity, or the ruleset.
    `gh auth login` on the host user.
 4. **Bot token registered.** A `MERCURY_API_TOKENS` entry for `bot-nightly`
    exists, and `~/.config/mercury/bot-credentials.json` is mode 0600.
+4a. **The rung-1 e2e gate is provisioned (#1010).** The nightly Run's
+   credential profile carries `MERCURY_API_URL` (the host API, e.g.
+   `http://127.0.0.1:3000`) and `MERCURY_API_TOKEN` (a `file:` reference to a
+   0600 token file). Without them `select.ts`'s gate has nothing to read and
+   **passes by absence**, so rung 1 starts before tonight's E2E verdict exists
+   — and the selector's answer now says `"e2eGate": "absent"` when that happens.
+   Record the grant with the checklist: which token, which owner, and what it
+   can do. On this host it is the `bot-nightly` API token (owner `bot-nightly`):
+   it reads and creates Runs **as that owner** and can cancel them, because the
+   API has no read-only scope yet — the gate only needs `GET /api/runs`.
 5. **Config validates clean.** Install the example
    (`mkdir -p ${XDG_CONFIG_HOME:-~/.config}/mercury/bots &&
    cp deploy/nightly-bot.json.example .../bots/nightly.json`), then
