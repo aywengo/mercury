@@ -39,7 +39,7 @@ Record: [`docs/host-installer.md`](docs/host-installer.md)
 | #638 | M6: release hardening — bats suite, installer CI matrix, checksum, install docs | done | #639 |
 | #929 | Host installer: the four "gate open" milestones (M1, M3, M4, M6) are verification work… | open | — |
 | #1029 | release: the formula push to main is refused by the ruleset, so every release leaves Homebrew… | done | #1046 |
-| #1045 | release: a failed curl probe yields HTTP 000000 in the release notes (and the test stub hides it) | in progress | #1047 |
+| #1045 | release: a failed curl probe yields HTTP 000000 in the release notes (and the test stub hides it) | done | #1047 |
 
 ## Nightly self-development
 
