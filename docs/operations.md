@@ -396,8 +396,9 @@ the host, the identity, or the ruleset.
    exists, and `~/.config/mercury/bot-credentials.json` is mode 0600.
 4a. **The rung-1 e2e gate is provisioned (#1010).** The nightly Run's
    credential profile carries `MERCURY_API_URL` (the host API, e.g.
-   `http://127.0.0.1:3000`) and `MERCURY_API_TOKEN` (a `file:` reference to a
-   0600 token file). Without them `select.ts`'s gate has nothing to read and
+   `{ "value": "http://127.0.0.1:3000" }`) and `MERCURY_API_TOKEN` (a
+   `{ "file": … }` reference to a 0600 token file). Those two are the only
+   `MERCURY_*` names a profile may inject; everything else is host config. Without them `select.ts`'s gate has nothing to read and
    **passes by absence**, so rung 1 starts before tonight's E2E verdict exists
    — and the selector's answer now says `"e2eGate": "absent"` when that happens.
    Record the grant with the checklist: which token, which owner, and what it

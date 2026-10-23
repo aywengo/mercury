@@ -135,10 +135,27 @@ test('#1035: an owner id that can never match is refused, and a real one still l
   }
 });
 
-test('env: MERCURY_* names refused; values are exactly file or value (#784)', () => {
+test('env: MERCURY_* names refused, except the two the nightly gate needs (#784, #1010)', () => {
   const dir = tempDir('cp2-env-');
   const reserved = { profiles: [{ ...VALID.profiles[0]!, env: { MERCURY_DB: { value: 'x' } } }] };
   assert.throws(() => loadCredentialProfiles(writeProfiles(dir, reserved)), /MERCURY_/);
+  // The exceptions exist because the worker strips every MERCURY_* name and a profile is the only
+  // layer that can put one back; without them the rung-1 e2e gate can never be configured (#1010).
+  // The error names them, so the next operator does not have to read this file to learn why.
+  assert.throws(() => loadCredentialProfiles(writeProfiles(dir, reserved)), /MERCURY_API_URL and MERCURY_API_TOKEN/);
+  const allowed = {
+    profiles: [{
+      ...VALID.profiles[0]!,
+      env: {
+        ...VALID.profiles[0]!.env,
+        MERCURY_API_URL: { value: 'http://127.0.0.1:3000' },
+        MERCURY_API_TOKEN: { file: '/tmp/tok' },
+      },
+    }],
+  };
+  const loaded = loadCredentialProfiles(writeProfiles(dir, allowed));
+  assert.deepEqual(loaded.profiles[0]!.env.MERCURY_API_URL, { value: 'http://127.0.0.1:3000' });
+  assert.deepEqual(loaded.profiles[0]!.env.MERCURY_API_TOKEN, { file: '/tmp/tok' });
   const both = { profiles: [{ ...VALID.profiles[0]!, env: { TOK: { file: '/a', value: 'b' } } }] };
   assert.throws(() => loadCredentialProfiles(writeProfiles(dir, both)), /exactly one of 'file' or 'value'/);
   const neither = { profiles: [{ ...VALID.profiles[0]!, env: { TOK: {} } }] };

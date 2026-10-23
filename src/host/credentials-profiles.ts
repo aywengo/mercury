@@ -57,6 +57,16 @@ export interface CredentialProfiles {
 
 const NAME_RE = /^[a-z0-9-]{1,40}$/;
 const FORBIDDEN_ENV_RE = /^MERCURY_/i;
+/**
+ * The MERCURY_ names a profile MAY inject (#1010). The blanket rule exists so a profile cannot
+ * override HOST configuration -- `MERCURY_DB`, `MERCURY_API_TOKENS`, `MERCURY_ADMIN_TOKEN` -- from
+ * inside a Run. These two are not host configuration: nothing in `src/` reads either name, and
+ * they exist only to tell the nightly skill where the host API is and how to read it. Without this
+ * exception the nightly Run cannot be told, and `select.ts`'s rung-1 gate passes by absence
+ * forever, because the worker strips every MERCURY_* name (layer 1) and a profile was the only
+ * layer that could put one back.
+ */
+const ALLOWED_MERCURY_ENV: ReadonlySet<string> = new Set(['MERCURY_API_URL', 'MERCURY_API_TOKEN']);
 const PROFILE_FIELDS: ReadonlySet<string> = new Set(['name', 'repositories', 'owners', 'env', 'git', 'sandbox']);
 
 /**
@@ -207,8 +217,8 @@ function validateProfile(raw: RawProfile, seenNames: Set<string>): CredentialPro
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
       throw new Error(`${where2}: env name ${JSON.stringify(key)} must match [A-Za-z_][A-Za-z0-9_]*`);
     }
-    if (FORBIDDEN_ENV_RE.test(key)) {
-      throw new Error(`${where2}: env '${key}' matches MERCURY_ which the host reserves; profiles must not override host configuration`);
+    if (FORBIDDEN_ENV_RE.test(key) && !ALLOWED_MERCURY_ENV.has(key)) {
+      throw new Error(`${where2}: env '${key}' matches MERCURY_ which the host reserves; profiles must not override host configuration (the only exceptions are ${[...ALLOWED_MERCURY_ENV].join(' and ')})`);
     }
     if (typeof value !== 'object' || value === null || Array.isArray(value)) {
       throw new Error(`${where2}: env '${key}' must be { "file": path } or { "value": string }`);
