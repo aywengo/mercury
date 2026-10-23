@@ -216,7 +216,7 @@ on Mercury's own Express app, so A1 can start.
 | #990 | Pure Run-chain → A2A TaskState mapping, exhaustive over RunStatus (A0-4) | done | #998 |
 | #989 | Exposed-skill config, create-Run validation of every template, `host a2a validate` (A0-5) | open | — |
 | #1030 | test: a2aServer section 6.6 blocking-bound test is timing-flaky and can block a release PR | done | #1039 |
-| #1040 | nightly: a crashed model server still lets the Run claim an issue, so the night ends with 17 failed Runs and stale claims | in progress | #1041 |
+| #1040 | nightly: a crashed model server still lets the Run claim an issue, so the night ends with 17 failed Runs and stale claims | done | #1041 |
 
 ## Security follow-ups
 
