@@ -1698,3 +1698,26 @@ test('an unconfirmed version is not asserted absent', () => {
     assert.match(r.notesOut, new RegExp(code), `${code} must be named so a reader can discount it`);
   }
 });
+
+test('#1029: the formula push uses the bypass identity, not the GITHUB_TOKEN', () => {
+  // `main` is protected (pull request + the `ci` check). The release job's last step commits
+  // Formula/mercury-ai.rb and pushes it, and on host-v0.2.3 that push was refused with GH013 AFTER
+  // npm had staged and the GitHub Release had been created -- so the release looked green while
+  // Homebrew stayed on 0.2.2. The fix is the same one plan-sync needed: check out with the operator
+  // PAT so the persisted git credential is the bypass identity, and push through that remote.
+  const wf = readFileSync(join(ROOT, '.github', 'workflows', 'release.yml'), 'utf8');
+  const checkout = wf.slice(wf.indexOf('- uses: actions/checkout@v4'), wf.indexOf('- uses: actions/setup-node@v4'));
+  assert.match(checkout, /token: \$\{\{ secrets\.OPERATOR_PAT \}\}/,
+    'the release job must check out with the bypass identity, or its formula push is refused by the ruleset');
+  assert.match(checkout, /persist-credentials: true/,
+    'the PAT must persist, since the formula push relies on the credential checkout wrote');
+  // A URL built from the repository name would authenticate as the GITHUB_TOKEN regardless.
+  assert.doesNotMatch(wf, /git push "https:\/\/github\.com\/\$\{GITHUB_REPOSITORY\}\.git"/,
+    'the formula push must not build its own remote URL: that drops the PAT and is refused');
+  assert.match(wf, /git push origin HEAD:main/);
+  // The comment that made this look safe must not come back.
+  assert.doesNotMatch(wf, /main is not branch-protected/,
+    'release.yml must not claim main is unprotected: the ruleset refuses a token push');
+  // And a refused push must say so, rather than leaving a green-looking release with a stale formula.
+  assert.match(wf, /could not be pushed to main; Homebrew still installs the previous version/);
+});
