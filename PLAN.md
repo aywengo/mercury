@@ -235,7 +235,7 @@ Record: [`docs/releasing.md`](docs/releasing.md)
 
 | Issue | Title | State | PR |
 | --- | --- | --- | --- |
-| #994 | release: the npm notes section asserts an approval state it never observed | open | — |
+| #994 | release: the npm notes section asserts an approval state it never observed | done | #1017 |
 
 ## Repository process
 
