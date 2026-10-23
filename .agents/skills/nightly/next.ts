@@ -288,38 +288,59 @@ export interface ExistingMatch { issue: number; state: string; by: 'source' | 't
  * window). A failed page, an unreadable page or a pagination-cap hit THROWS (fail closed, #881
  * acceptance 4): the caller files nothing and the report says the dedupe check could not run.
  * Pull requests are skipped. */
+/** GitHub's search API serves at most 1000 results (10 pages of 100) per query. Unlike a list
+ * walk, that bound does not grow with the repository: `is:issue` keeps pull requests out, and the
+ * query is the source marker or the exact title, so a full cap means the search itself is too
+ * broad to answer "does this exist" -- which is a failed search, not a reason to file. */
+export const MAX_SEARCH_PAGES = 10;
+
 export async function findExistingProposal(io: NextIo, opts: { repo: string; source: string; title: string }): Promise<ExistingMatch | null> {
   const marker = sourceMarker(opts.source);
   const title = opts.title.trim();
   if (title === '') throw new Error('a proposal needs a non-empty --title');
-  let listPath: string | null = `/repos/${opts.repo}/issues?state=all&per_page=100`;
-  for (let page = 0; page < 10 && listPath; page++) {
-    const res = await io.get(listPath);
-    if (res.status < 200 || res.status >= 300) {
-      throw new Error(`dedupe search failed: GET ${listPath} -> ${res.status}; nothing is filed`);
-    }
-    // `shared.ts` returns `body: null` when a 200 response cannot be decoded, and `?? []` read that
-    // as "this page listed nothing": the scan found no match, the walk reached its end, and
-    // `proposeIssue` filed a duplicate. An unreadable page is a failed search like any other --
-    // throw, so the caller files nothing. `Array.isArray` also refuses a JSON object body (an error
-    // payload served with a 200), which `?? []` passed to `for...of` as an unhelpful TypeError.
-    if (!Array.isArray(res.body)) {
-      throw new Error(`dedupe search failed: GET ${listPath} -> ${res.status} returned a body that is not a list; the page could not be read, so nothing is filed (fail closed, #881)`);
-    }
-    const items = res.body as { number: number; title?: string; body?: string | null; state?: string; pull_request?: unknown }[];
-    for (const it of items) {
-      if (it.pull_request) continue;
-      if (typeof it.body === 'string' && it.body.includes(marker)) {
-        return { issue: it.number, state: it.state ?? 'unknown', by: 'source' };
+  // Two legs, both over issues only (a pull request quoting the marker is not a proposal):
+  //   * the source marker, quoted so GitHub matches the phrase and not its words;
+  //   * the exact title, compared client-side because `in:title` is a word match.
+  // The list endpoint was the first choice (#928) because a list walk has no index lag, but it
+  // counts PAGES over every issue AND pull request in the repository: at ~1000 items the walk
+  // could no longer prove absence and #881's fail-closed rule turned rung 4 into a permanent
+  // no-op (#1018). Search answers the same question with a bound that repo growth cannot reach.
+  const legs: { by: 'source' | 'title'; q: string }[] = [
+    { by: 'source', q: `repo:${opts.repo} is:issue "${marker}"` },
+    { by: 'title', q: `repo:${opts.repo} is:issue in:title "${title}"` },
+  ];
+  for (const leg of legs) {
+    let path: string | null = `/search/issues?q=${encodeURIComponent(leg.q)}&per_page=100`;
+    for (let page = 0; page < MAX_SEARCH_PAGES && path; page++) {
+      const res = await io.get(path);
+      if (res.status < 200 || res.status >= 300) {
+        throw new Error(`dedupe search failed: GET ${path} -> ${res.status}; nothing is filed`);
       }
-      if (typeof it.title === 'string' && it.title.trim() === title) {
-        return { issue: it.number, state: it.state ?? 'unknown', by: 'title' };
+      // `shared.ts` returns `body: null` when a 200 response cannot be decoded. An unreadable
+      // answer is a failed search like any other -- throw, so the caller files nothing.
+      const payload = res.body as { items?: unknown; incomplete_results?: unknown } | null;
+      if (!payload || typeof payload !== 'object' || !Array.isArray(payload.items)) {
+        throw new Error(`dedupe search failed: GET ${path} -> ${res.status} returned a body without an items list; the answer could not be read, so nothing is filed (fail closed, #881)`);
       }
-    }
-    const next = res.link?.match(/<([^>]+)>;\s*rel="next"/)?.[1] ?? null;
-    listPath = next ? next.replace('https://api.github.com', '') : null;
-    if (page === 9 && listPath) {
-      throw new Error('dedupe search hit its 10-page cap; the remaining issues were not checked, so nothing is filed (fail closed, #881)');
+      // `incomplete_results` means the search timed out and its answer is partial: a miss proves
+      // nothing, so filing on it would be exactly the duplicate #881 exists to prevent.
+      if (payload.incomplete_results === true) {
+        throw new Error(`dedupe search was incomplete (incomplete_results: true) for ${leg.by}; the answer cannot prove absence, so nothing is filed (fail closed, #881)`);
+      }
+      const items = payload.items as { number: number; title?: string; body?: string | null; state?: string }[];
+      for (const it of items) {
+        if (leg.by === 'source' && typeof it.body === 'string' && it.body.includes(marker)) {
+          return { issue: it.number, state: it.state ?? 'unknown', by: 'source' };
+        }
+        if (leg.by === 'title' && typeof it.title === 'string' && it.title.trim() === title) {
+          return { issue: it.number, state: it.state ?? 'unknown', by: 'title' };
+        }
+      }
+      const next = res.link?.match(/<([^>]+)>;\s*rel="next"/)?.[1] ?? null;
+      path = next ? next.replace('https://api.github.com', '') : null;
+      if (page === MAX_SEARCH_PAGES - 1 && path) {
+        throw new Error(`dedupe search hit its ${MAX_SEARCH_PAGES}-page cap (1000 results) on the ${leg.by} leg; the remaining results were not checked, so nothing is filed (fail closed, #881, cap: MAX_SEARCH_PAGES in .agents/skills/nightly/next.ts)`);
+      }
     }
   }
   return null;
