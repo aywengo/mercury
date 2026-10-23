@@ -8,6 +8,39 @@ and this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-10-23
+
+A patch release. Two host-side fixes protect what the host says about itself — a migration that claimed
+a version whose objects were missing, and a credential profile that accepted an owner id no Run could
+match. The release pipeline now discloses a channel it could not update, and the nightly skill stops
+being blind: it checks the model before it claims, names the Runs that failed, and files proposals again.
+
+### Fixed
+
+- **`mercury migrate` verifies the schema, not the version number (#1032, #1034).** A database whose
+  `schema_migrations` claimed a version while a table was missing kept starting, and every Run creation
+  then returned 500. The verifier compares `sqlite_master` and `PRAGMA table_info` against the expected
+  schema.
+- **`credentials validate` refuses an owner id that can never match (#1035, #1038).** A placeholder
+  owner id was accepted, and the profile then refused every Run the bot created.
+- **The release body discloses a Homebrew formula it could not update (#1029, #1046).** The push uses
+  the operator identity; when it is refused the job corrects the published body before failing.
+- **A probe that never answered reads `HTTP 000`, not `HTTP 000000` (#1045, #1047).**
+- **The npm channel state is read from the registry (#994, #1017).**
+- **The A2A blocking-bound test fails on the clock, not on a race (#1030, #1039).**
+
+### Added
+
+- **Credential profiles may inject `MERCURY_API_URL` and `MERCURY_API_TOKEN` (#1010, #1049).** The only
+  `MERCURY_*` names a profile may set; they exist so the nightly skill can read the host API.
+
+### Changed
+
+- **The nightly skill checks the model endpoint before the ladder claims (#1040, #1041).**
+- **The nightly report lists the Runs that failed (#1042, #1043).**
+- **Rung 4 dedupes through the search API, so it files proposals again (#1018, #1048).**
+- **The rung-1 e2e gate reports `configured` / `absent` / `half-configured` / `unevaluable` (#1010, #1049).**
+
 ## [0.2.3] - 2026-10-22
 
 A short release carrying what merged after 0.2.2: the A2A binding, the layered local Run environment,
