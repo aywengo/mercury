@@ -1727,8 +1727,10 @@ test('#1029: the formula push uses the bypass identity, not the GITHUB_TOKEN', (
   // PAT so the persisted git credential is the bypass identity, and push through that remote.
   const wf = readFileSync(join(ROOT, '.github', 'workflows', 'release.yml'), 'utf8');
   const checkout = wf.slice(wf.indexOf('- uses: actions/checkout@v4'), wf.indexOf('- uses: actions/setup-node@v4'));
-  assert.match(checkout, /token: \$\{\{ secrets\.OPERATOR_PAT \}\}/,
-    'the release job must check out with the bypass identity, or its formula push is refused by the ruleset');
+  // `|| github.token` because actions/checkout REFUSES an empty token input: with the secret unset
+  // the whole job died at step 1 and released nothing, which is worse than the formula bug (#1051).
+  assert.match(checkout, /token: \$\{\{ secrets\.OPERATOR_PAT \|\| github\.token \}\}/,
+    'the release job must check out with the bypass identity, and must not die when the secret is absent');
   assert.match(checkout, /persist-credentials: true/,
     'the PAT must persist, since the formula push relies on the credential checkout wrote');
   // A URL built from the repository name would authenticate as the GITHUB_TOKEN regardless.
@@ -1758,4 +1760,21 @@ test('#1029: a refused formula push corrects the PUBLISHED body, not just the lo
   // And the same run with a successful push must NOT carry the correction.
   const ok = runTag(`host-v${V}`, { notes: [`host/${V}.md`], oidc: true, npmToken: '', formulaHttp: '200' });
   assert.ok(!/Homebrew was not updated/.test(ok.notesArg), 'a successful push must not be annotated');
+});
+
+test('#1051: an unset OPERATOR_PAT does not kill the release, and the log names it', () => {
+  // Observed: `actions/checkout` fails with "Input required and not supplied: token" when the
+  // secret is missing, so the job stopped before parsing the tag. The checkout now falls back to
+  // github.token; the formula push is the last step and already fails loudly, correcting the body.
+  const wf = readFileSync(join(ROOT, '.github', 'workflows', 'release.yml'), 'utf8');
+  assert.match(wf, /OPERATOR_PAT \|\| github\.token/,
+    'the checkout must fall back rather than fail closed on a missing secret');
+  // The warning must read the variable in the SAME step: a step env is not inherited from another.
+  const publish = wf.slice(wf.indexOf('- name: Parse tag and publish'));
+  assert.match(publish, /OPERATOR_PAT: \$\{\{ secrets\.OPERATOR_PAT \}\}/,
+    'the publish step needs the secret in its own env for the warning to see it');
+  assert.match(publish, /::warning::OPERATOR_PAT is not set/,
+    'the log must name the missing capability instead of leaving a bare GH013 to interpret');
+  // And the warning is a WARNING, not a failure: the rest of the release still has to run.
+  assert.match(publish, /if \[ -z "\$\{OPERATOR_PAT:-\}" \]; then\n\s+echo "::warning::/);
 });

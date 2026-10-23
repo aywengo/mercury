@@ -52,7 +52,13 @@ jobs:
           # Check out with the operator PAT so the persisted git credential is the bypass identity,
           # the same mechanism plan-sync uses; a remote override alone would not work, because
           # checkout's persisted Authorization header takes precedence over a token in the URL.
-          token: ${{ secrets.OPERATOR_PAT }}
+          #
+          # `|| github.token` because checkout REFUSES an empty token input: with the secret unset
+          # the job died at step 1 and released nothing at all, which is worse than the formula bug
+          # this replaced (#1051). The fallback keeps the release, the assets and the npm stage
+          # working; the push that needs the bypass identity is the last step and already fails
+          # loudly, correcting the published body when it is refused.
+          token: ${{ secrets.OPERATOR_PAT || github.token }}
           persist-credentials: true
 
       - uses: actions/setup-node@v4
@@ -66,6 +72,9 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_DIRECT_PUBLISH: ${{ vars.NPM_DIRECT_PUBLISH }}
           DRY_RUN: ${{ github.event_name == 'workflow_dispatch' }}
+          # Presence is what the warning below reads; the value never reaches the log. The checkout
+          # above already carries it, but a step's env is not inherited from another step (#1051).
+          OPERATOR_PAT: ${{ secrets.OPERATOR_PAT }}
           # Which product a rehearsal derives its tag from. Passed as an env var rather than
           # interpolated into the script body, so the step stays free of ${{ }} expressions and the
           # harness in test/releaseWorkflow.test.ts can execute this script directly.
@@ -821,6 +830,11 @@ jobs:
           # bypass identity: the checkout above uses `secrets.OPERATOR_PAT` for exactly that reason
           # (#1029). The formula lives in this repository rather than a separate tap, so no
           # cross-repository credential is involved.
+          # Name the missing capability in the log rather than letting it surface as a refused push:
+          # an operator reading "GH013" has to know which secret the push was supposed to carry.
+          if [ -z "${OPERATOR_PAT:-}" ]; then
+            echo "::warning::OPERATOR_PAT is not set: the formula push will authenticate as GITHUB_TOKEN and the main ruleset will refuse it, so Homebrew stays on the previous version. Add the secret to fix it (#1051)."
+          fi
           if [ "${DRY_RUN:-}" = "true" ]; then
             echo "DRY RUN: not touching Formula/mercury-ai.rb (bundle sha256=${bundle_sha:-n/a})"
           elif [ "$product" = "host" ]; then
