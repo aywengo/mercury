@@ -80,7 +80,6 @@ export interface NextSelection {
   action: 'fix-loop' | 'draft-proposals' | 'no-op';
 }
 
-/** Every entry point interpolates repo into API paths: one strict owner/name check. */
 /**
  * The preflight failed, so NOTHING was claimed. Carries the record so the CLI can print it and the
  * Run leaves a readable "model unavailable" line instead of an unexplained non-zero exit (#1040).
@@ -105,16 +104,42 @@ export interface RunNextOptions {
   task?: string;
   /** Test seam for the preflight. */
   checkModel?: (model: string) => Promise<ModelCheck>;
+  /** Endpoint/key overrides, forwarded to the preflight (`--base-url`, `--api-key`). */
+  baseUrl?: string;
+  apiKey?: string;
+  /** Bot config overrides for the model pin (`--bot-config`, `--bot`). */
+  botConfig?: string;
+  bot?: string;
+}
+
+/**
+ * Refuse to go on when the model endpoint cannot answer. Throws `ModelUnavailableError` (which
+ * carries the record) on any non-ok result; does nothing when no model is named.
+ *
+ * Exported separately because the CLI must run it BEFORE it builds the GitHub transport: a dead
+ * model server should be reported as such, not as "GH_TOKEN is missing" (#1040 review).
+ */
+export async function preflightModel(opts: {
+  model?: string;
+  task?: string;
+  baseUrl?: string;
+  apiKey?: string;
+  botConfig?: string;
+  bot?: string;
+  checkModel?: (model: string) => Promise<ModelCheck>;
+}): Promise<void> {
+  const model = opts.model ?? (opts.task ? resolveTaskModel(opts.task, { configPath: opts.botConfig, bot: opts.bot }) : undefined);
+  if (model === undefined) return;
+  const run = opts.checkModel ??
+    ((m: string) => checkModel({ model: m, baseUrl: opts.baseUrl ?? defaultEndpoint(), apiKey: opts.apiKey ?? defaultApiKey() }));
+  const check = await run(model);
+  if (check.status !== 'ok') throw new ModelUnavailableError(check);
 }
 
 /** Run the ladder (with claim) and report what the agent should do. */
 export async function runNext(io: NextIo, env: NodeJS.ProcessEnv, opts: RunNextOptions): Promise<NextSelection> {
   assertRepo(opts.repo);
-  const model = opts.model ?? (opts.task ? resolveTaskModel(opts.task) : undefined);
-  if (model !== undefined) {
-    const check = await (opts.checkModel ?? ((m: string) => checkModel({ model: m, baseUrl: defaultEndpoint(), apiKey: defaultApiKey() })))(model);
-    if (check.status !== 'ok') throw new ModelUnavailableError(check);
-  }
+  await preflightModel(opts);
   const selection = await runSelectorWith(
     {
       // Fail loud on non-2xx reads: the selector assumes its transport throws (its own ghGet
@@ -379,17 +404,31 @@ if (isMain) {
   const cmd = args[0];
   const flag = (name: string): string | undefined => {
     const i = args.indexOf(name);
-    return i >= 0 ? args[i + 1] : undefined;
+    if (i < 0) return undefined;
+    const value = args[i + 1];
+    if (value === undefined || value.startsWith('--')) throw new Error(`${name} requires a value`);
+    return value;
   };
   const repo = flag('--repo') ?? process.env.REPO ?? '';
   const work = (async (): Promise<unknown> => {
     if (cmd === 'run') {
-      return await runNext(realIo(process.env), process.env, {
-        repo,
-        dryRun: args.includes('--dry-run'),
+      const dryRun = args.includes('--dry-run');
+      // The model preflight is ON by default: the whole point is that a crashed server must not
+      // cost a claim, and a guard the caller has to remember to request protects nothing (#1040
+      // review M1). `--dry-run` writes nothing, so it skips; `--skip-model-check` is the explicit
+      // escape hatch (no bot config on this host, a deliberately offline probe).
+      const skip = args.includes('--skip-model-check') || dryRun;
+      // BEFORE realIo(): building the GitHub transport demands a token, and "GH_TOKEN is missing" is
+      // the wrong report for a night whose model server is down.
+      await preflightModel({
         model: flag('--model'),
-        task: flag('--task'),
+        task: skip ? flag('--task') : (flag('--task') ?? 'nightly-next'),
+        baseUrl: flag('--base-url'),
+        apiKey: flag('--api-key'),
+        botConfig: flag('--bot-config'),
+        bot: flag('--bot'),
       });
+      return await runNext(realIo(process.env), process.env, { repo, dryRun });
     }
     if (cmd === 'finish') {
       const issue = Number(flag('--issue'));

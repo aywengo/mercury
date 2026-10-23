@@ -24,7 +24,7 @@
 
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 
 /** Bounded: an endpoint that does not answer in this window is DOWN for our purposes. */
 export const MODEL_CHECK_TIMEOUT_MS = 5_000;
@@ -92,6 +92,7 @@ export async function checkModel(opts: CheckModelOptions): Promise<ModelCheck> {
   if (opts.apiKey) headers.authorization = `Bearer ${opts.apiKey}`;
 
   let last: { status: number; body: unknown } | null = null;
+  let authFailure: string | null = null;
   for (const path of LIST_PATHS) {
     let res: { status: number; body: unknown };
     try {
@@ -101,7 +102,11 @@ export async function checkModel(opts: CheckModelOptions): Promise<ModelCheck> {
       return { status: 'unreachable', model: opts.model, endpoint, reason: describe(e) };
     }
     if (res.status === 401 || res.status === 403) {
-      return { status: 'unauthorized', model: opts.model, endpoint, reason: `${path} -> ${res.status}` };
+      // The admin routes and the OpenAI-compatible routes can require different keys: keep trying
+      // the other shapes before calling the endpoint unauthorized (#1040 review M2).
+      if (!authFailure) authFailure = `${path} -> ${res.status}`;
+      last = res;
+      continue;
     }
     if (res.status === 404) { last = res; continue; } // no admin routes: try the next shape
     if (res.status < 200 || res.status >= 300) {
@@ -119,6 +124,7 @@ export async function checkModel(opts: CheckModelOptions): Promise<ModelCheck> {
       reason: `${ids.length} model(s) listed, none named '${opts.model}'`,
     };
   }
+  if (authFailure) return { status: 'unauthorized', model: opts.model, endpoint, reason: authFailure };
   return { status: 'unreachable', model: opts.model, endpoint, reason: `no model listing at ${endpoint}${last ? ` (last -> ${last.status})` : ''}` };
 }
 
@@ -154,11 +160,35 @@ function errorCode(e: unknown, depth = 0): string | undefined {
   return errorCode((e as { cause?: unknown }).cause, depth + 1);
 }
 
+/**
+ * The bots directory, mirroring `src/host/bots/config.ts::botsDir` EXACTLY (#1040 review B1).
+ * A second rule here -- e.g. a made-up `MERCURY_CONFIG_HOME` -- would read a different file than the
+ * scheduler does, find no pin, and block every night while the real config sat one directory away.
+ */
+export function botsDir(env: NodeJS.ProcessEnv = process.env): string {
+  const xdg = env.XDG_CONFIG_HOME;
+  if (xdg && xdg.trim() !== '') return join(xdg, 'mercury', 'bots');
+  return join(homedir(), '.config', 'mercury', 'bots');
+}
+
+export interface ResolveTaskModelOptions {
+  /** Explicit config file; wins over the bots directory (the `--bot-config` seam). */
+  configPath?: string;
+  /** Bot alias, i.e. the file name: `nightly` -> `<botsDir>/nightly.json`. */
+  bot?: string;
+  env?: NodeJS.ProcessEnv;
+}
+
 /** Read the model a bot task pins, from the bot config that schedules it. The pin has exactly one
  * home; a preflight that took its own copy of the model id would drift from the Run's. */
-export function resolveTaskModel(task: string, configPath?: string): string {
-  const path = configPath ?? join(process.env.MERCURY_CONFIG_HOME ?? join(homedir(), '.config', 'mercury'), 'bots', 'nightly.json');
-  const cfg = JSON.parse(readFileSync(path, 'utf8')) as { schedule?: { tasks?: { name?: string; template?: { model?: string } }[] } };
+export function resolveTaskModel(task: string, opts: ResolveTaskModelOptions = {}): string {
+  const path = opts.configPath ?? join(botsDir(opts.env), `${opts.bot ?? 'nightly'}.json`);
+  let cfg: { schedule?: { tasks?: { name?: string; template?: { model?: string } }[] } };
+  try {
+    cfg = JSON.parse(readFileSync(path, 'utf8'));
+  } catch (e) {
+    throw new Error(`cannot read the bot config ${path}: ${e instanceof Error ? e.message : String(e)}; pass --model <id> or --skip-model-check`);
+  }
   const tasks = cfg.schedule?.tasks ?? [];
   const found = tasks.find((t) => t.name === task);
   if (!found) throw new Error(`${path} has no task named '${task}' (tasks: ${tasks.map((t) => t.name).join(', ') || 'none'})`);
@@ -194,18 +224,24 @@ export function exitCodeFor(check: ModelCheck): number {
 
 // ---- CLI ----
 
-const isMain = process.argv[1] !== undefined && import.meta.url.endsWith(process.argv[1].split('/').pop() ?? '');
+const isMain = process.argv[1] !== undefined && import.meta.url.endsWith(basename(process.argv[1]));
 if (isMain) {
   const args = process.argv.slice(2);
+  /** A flag's value; a flag at the end of argv is a usage error, not `undefined`. */
   const flag = (name: string): string | undefined => {
     const i = args.indexOf(name);
-    return i >= 0 ? args[i + 1] : undefined;
+    if (i < 0) return undefined;
+    const value = args[i + 1];
+    if (value === undefined || value.startsWith('--')) throw new Error(`${name} requires a value`);
+    return value;
   };
   const cmd = args[0] ?? 'check';
   try {
-    if (cmd !== 'check') throw new Error('usage: model.ts check [--task <name>] [--model <id>] [--bot-config <path>] [--base-url <url>] [--api-key <key>]');
+    if (cmd !== 'check') {
+      throw new Error('usage: model.ts check [--task <name>] [--bot <alias>] [--bot-config <path>] [--model <id>] [--base-url <url>] [--api-key <key>]');
+    }
     const task = flag('--task');
-    const model = flag('--model') ?? (task ? resolveTaskModel(task, flag('--bot-config')) : undefined);
+    const model = flag('--model') ?? (task ? resolveTaskModel(task, { configPath: flag('--bot-config'), bot: flag('--bot') }) : undefined);
     if (!model) throw new Error('pass --task <bot task> (reads its pinned model) or --model <id>');
     const check = await checkModel({
       model,

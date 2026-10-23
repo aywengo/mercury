@@ -123,7 +123,7 @@ The report is exactly one JSON line `{ pass, fail, real, flakes }`.
 ## Model preflight (`model.ts`, #1040)
 
 ```bash
-node .agents/skills/nightly/model.ts check --task nightly-next
+node .agents/skills/nightly/model.ts check --task nightly-next [--bot nightly] [--bot-config <path>]
 ```
 
 A crashed or reloading model server does not fail a Run when it is created: the Run starts, this
@@ -147,10 +147,13 @@ model is not on the server, `64` usage. The model id is read from the bot task t
 overrides it; `--base-url`/`--api-key` default to the local oMLX (`OMLX_BASE_URL`, `OMLX_API_KEY`,
 else `~/.prime/agent/models.json`).
 
-**`next.ts run` runs this itself** when given `--task` or `--model`, BEFORE the ladder and therefore
-before the claim: on any non-ok record it prints the record as its JSON line, exits 1, and claims
-nothing. Running `model.ts check` first is still worthwhile — it names the reason in one line
-instead of a failed Run — but the claim is protected either way.
+**`next.ts run` runs this itself, by default**, BEFORE the ladder and therefore before the claim: on
+any non-ok record it prints the record as its JSON line, exits 1, and claims nothing. The default
+task is `nightly-next`, so a bare `next.ts run --repo aywengo/mercury` is protected; `--dry-run`
+skips the check (it writes nothing) and `--skip-model-check` is the explicit escape hatch. The check
+runs before the GitHub transport is built, so a down model is reported as such and not as a missing
+token. `--model <id>`, `--base-url`, `--api-key`, `--bot <alias>` and `--bot-config <path>` override
+what the pin and the host provide.
 
 **When the preflight fails, do not work around it.** Do not claim, do not retry the endpoint, do
 not fall back to another model. Report the record and end the Run; the night produces one clear
@@ -159,13 +162,16 @@ not fall back to another model. Report the record and end the Run; the night pro
 ## Next (`next.ts`, N1-3)
 
 ```bash
-node .agents/skills/nightly/next.ts run --repo aywengo/mercury --task nightly-next [--dry-run]
+node .agents/skills/nightly/next.ts run --repo aywengo/mercury [--dry-run] [--skip-model-check]
 node .agents/skills/nightly/next.ts finish --repo aywengo/mercury --issue <n>
 node .agents/skills/nightly/next.ts blocked --repo aywengo/mercury --issue <n> --reason "<question>"
 ```
 
-`--task nightly-next` is what turns on the model preflight above; without it `run` checks nothing
-(the tests and `--dry-run` do not need a live model server).
+`run` checks the model endpoint first (see above) unless `--dry-run` or `--skip-model-check` is
+given. The pin is read from the task that runs it — `<botsDir>/nightly.json` → `nightly-next` →
+`template.model`, where `<botsDir>` is `$XDG_CONFIG_HOME/mercury/bots` or `~/.config/mercury/bots`,
+the same directory the scheduler reads. A task with no pin is an error naming the file, not a silent
+skip.
 
 `run` executes the N1-1 ladder (rung 0 resume, rung 1 trusted bugs, rung 2 trusted enhancements,
 rung 3 new @aywengo issues, rung 4 docs → proposals) and claims the chosen issue `nightly:in-progress` (already done by the selector before

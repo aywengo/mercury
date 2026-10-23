@@ -46,7 +46,8 @@
           ],
           "repository": {
             "url": "https://github.com/aywengo/mercury.git"
-          }
+          },
+          "model": "Qwen3.8-27B-MLX-bf16-mtp"
         }
       },
       {
