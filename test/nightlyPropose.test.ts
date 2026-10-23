@@ -248,3 +248,41 @@ test('#1018: a search whose items cannot be read fails closed too', async () => 
   );
   assert.ok(!calls.some((c) => c.method === 'POST'));
 });
+
+test('#1053: the title leg queries TERMS, so punctuation cannot make an existing title unfindable', async () => {
+  // Measured on #954: `in:title "<exact title>"` returned total_count 0, because GitHub search is
+  // token-based and the title carries §, — and :. The old phrase query read as "not filed yet" and
+  // rung 4 would have filed a duplicate. The query is now the title's terms, ANDed.
+  const punctuated = 'Credential profiles: the three §15 open questions are live — decide the default (docs/credential-profiles-design.md §15)';
+  const existing = issueShaped({ number: 954, title: punctuated, body: 'no marker here', state: 'open' });
+  const { io, calls } = listIo([[existing]]);
+  const bf = await bodyFile();
+  const out = await proposeIssue(io, process.env, { repo: REPO, source: KEY, title: punctuated, bodyFile: bf });
+  assert.equal(out.created, false, 'an exact title must block, punctuation or not');
+  assert.equal(out.existing?.issue, 954);
+  assert.equal(out.existing?.by, 'title');
+  const q = calls.filter((c) => c.method === 'GET').map((c) => new URL(`https://api.github.com${c.path}`).searchParams.get('q') ?? '');
+  const titleQ = q.find((x) => x.includes('in:title')) ?? '';
+  assert.doesNotMatch(titleQ, /"/, `the title leg must not quote the phrase: ${titleQ}`);
+  assert.match(titleQ, /in:title credential profiles the three 15 open questions/, 'alphanumeric terms, lowercased');
+});
+
+test('#1053: the source leg queries the KEY, not the marker, and still compares the marker exactly', async () => {
+  // `"<!-- nightly-source:k -->"` is a phrase GitHub cannot match: the angle brackets and colons are
+  // stripped, and the remaining terms do not have to be adjacent to the real marker.
+  const { io, calls } = listIo([[issueShaped({ number: 7, title: 'x', body: 'no marker' })]]);
+  const bf = await bodyFile();
+  const out = await proposeIssue(io, process.env, { repo: REPO, source: KEY, title: TITLE, bodyFile: bf });
+  assert.equal(out.created, true, 'a search hit whose body lacks the marker must not block');
+  const q = calls.filter((c) => c.method === 'GET').map((c) => new URL(`https://api.github.com${c.path}`).searchParams.get('q') ?? '');
+  assert.ok(q.some((x) => x.includes(`"${KEY}"`)), `the source leg must query the key: ${q.join(' | ')}`);
+  assert.ok(!q.some((x) => x.includes('nightly-source')), 'the marker phrase must not be sent to search');
+});
+
+test('#1053: titleTerms stays inside the 256-character query budget', async () => {
+  const { titleTerms } = await import('../.agents/skills/nightly/next.ts');
+  const long = Array.from({ length: 60 }, (_, i) => `word${i}`).join(' ');
+  assert.ok(titleTerms(long).length <= 200);
+  assert.ok(`repo:aywengo/mercury is:issue in:title ${titleTerms(long)}`.length <= 256);
+  assert.equal(titleTerms('  Crew Phase 4: per-run MCP  '), 'crew phase 4 per run mcp');
+});

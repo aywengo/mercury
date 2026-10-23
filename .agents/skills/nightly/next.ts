@@ -297,20 +297,43 @@ export interface ExistingMatch { issue: number; state: string; by: 'source' | 't
  * broad to answer "does this exist" -- which is a failed search, not a reason to file. */
 export const MAX_SEARCH_PAGES = 10;
 
+
+/** GitHub search caps a query at 256 characters, and a long title does not fit. Tokens are ANDed
+ * (the default), so the first few distinctive words narrow the candidate set and the caller's exact
+ * comparison decides. Alphanumeric runs only: `§15` becomes `15`, `<!--` disappears, and punctuation
+ * cannot make the query unmatchable (#1053). */
+export function titleTerms(title: string, budget = 200): string {
+  const terms: string[] = [];
+  for (const term of title.toLowerCase().split(/[^a-z0-9]+/)) {
+    if (term === '') continue;
+    if ([...terms, term].join(' ').length > budget) break;
+    terms.push(term);
+  }
+  return terms.join(' ');
+}
+
 export async function findExistingProposal(io: NextIo, opts: { repo: string; source: string; title: string }): Promise<ExistingMatch | null> {
   const marker = sourceMarker(opts.source);
   const title = opts.title.trim();
   if (title === '') throw new Error('a proposal needs a non-empty --title');
   // Two legs, both over issues only (a pull request quoting the marker is not a proposal):
-  //   * the source marker, quoted so GitHub matches the phrase and not its words;
-  //   * the exact title, compared client-side because `in:title` is a word match.
+  //   * the source KEY, as a phrase;
+  //   * the title's terms, ANDed.
+  // Both are then compared EXACTLY client-side (marker substring, trimmed title equality).
+  //
+  // Neither query may be the marker or the whole title as a quoted phrase: GitHub search is
+  // token-based, so `"<!-- nightly-source:k -->"` and a title containing `§`, `—` or `:` match
+  // nothing at all -- measured on #954, whose exact title returned total_count 0 while the term
+  // query below finds it (#1053). A phrase query that silently finds nothing is worse than no
+  // search, because it reads as "not filed yet".
+  //
   // The list endpoint was the first choice (#928) because a list walk has no index lag, but it
   // counts PAGES over every issue AND pull request in the repository: at ~1000 items the walk
   // could no longer prove absence and #881's fail-closed rule turned rung 4 into a permanent
   // no-op (#1018). Search answers the same question with a bound that repo growth cannot reach.
   const legs: { by: 'source' | 'title'; q: string }[] = [
-    { by: 'source', q: `repo:${opts.repo} is:issue "${marker}"` },
-    { by: 'title', q: `repo:${opts.repo} is:issue in:title "${title}"` },
+    { by: 'source', q: `repo:${opts.repo} is:issue "${opts.source}"` },
+    { by: 'title', q: `repo:${opts.repo} is:issue in:title ${titleTerms(title)}` },
   ];
   for (const leg of legs) {
     let path: string | null = `/search/issues?q=${encodeURIComponent(leg.q)}&per_page=100`;
