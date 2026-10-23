@@ -18,18 +18,25 @@ function issueShaped(over: { number: number; title?: string; body?: string; stat
   return { user: { login: 'mercury-nightly' }, labels: [], created_at: '2026-10-01T00:00:00Z', ...over };
 }
 
-/** An io whose issue list (state=all) serves `pages` of issues; everything else recorded. */
-function listIo(pages: ListItem[][], created?: { status: number; body: unknown }) {
+/** An io whose dedupe search serves `pages` of results, per query, with a `rel="next"` link while
+ * more pages remain. `over` overrides the answer for a leg by index (0 = source, 1 = title). */
+function listIo(pages: ListItem[][], over: Record<number, { status?: number; body?: unknown; link?: string | null }> = {}, created?: { status: number; body: unknown }) {
   const calls: { method: string; path: string; body?: unknown }[] = [];
+  const seen = new Map<string, number>();
   const io: NextIo = {
     async get(path) {
       calls.push({ method: 'GET', path });
-      if (!path.startsWith(`/repos/${REPO}/issues?state=all`)) return { body: [], status: 200, link: null };
-      const page = calls.filter((c) => c.method === 'GET' && c.path.startsWith(`/repos/${REPO}/issues?state=all`)).length - 1;
+      if (!path.startsWith('/search/issues?')) return { body: [], status: 200, link: null };
+      const q = new URL(`https://api.github.com${path}`).searchParams.get('q') ?? '';
+      const leg = q.includes('in:title') ? 1 : 0;
+      const page = (seen.get(q) ?? 0);
+      seen.set(q, page + 1);
+      const o = over[leg];
+      if (o && page === 0) return { body: o.body ?? null, status: o.status ?? 200, link: o.link ?? null };
       const link = page < pages.length - 1
-        ? `<https://api.github.com/repos/${REPO}/issues?state=all&page=${page + 2}>; rel="next"`
+        ? `<https://api.github.com/search/issues?q=${encodeURIComponent(q)}&per_page=100&page=${page + 2}>; rel="next"`
         : null;
-      return { body: pages[page] ?? [], status: 200, link };
+      return { body: { total_count: 1, incomplete_results: false, items: pages[page] ?? [] }, status: 200, link };
     },
     async post(path, body) {
       calls.push({ method: 'POST', path, body });
@@ -124,7 +131,7 @@ test('acceptance 4c: a 200 page whose body cannot be decoded fails closed and fi
   const bf = await bodyFile();
   await assert.rejects(
     () => proposeIssue(io, process.env, { repo: REPO, source: KEY, title: TITLE, bodyFile: bf }),
-    /not a list/,
+    /without an items list/,
   );
   assert.equal(calls.length, 0, 'fail closed: nothing filed');
 });
@@ -142,7 +149,7 @@ test('acceptance 4d: a 200 page carrying a JSON object body fails closed too', a
   const bf = await bodyFile();
   await assert.rejects(
     () => proposeIssue(io, process.env, { repo: REPO, source: KEY, title: TITLE, bodyFile: bf }),
-    /not a list/,
+    /without an items list/,
   );
   assert.equal(calls.length, 0, 'fail closed: nothing filed');
 });
@@ -172,13 +179,15 @@ test('dedupe walks pagination: a match on a later page is still found', async ()
   assert.equal(out.existing?.issue, 3);
 });
 
-test('pull requests on the state=all list are skipped', async () => {
-  const pr: ListItem = { number: 9, title: TITLE, body: sourceMarker(KEY), state: 'open', pull_request: { html_url: 'x' } };
-  const { io, calls } = listIo([[pr]]);
+test('the search asks for issues only, so a pull request quoting the marker cannot block', async () => {
+  // The list endpoint returned pull requests and the walk skipped them client-side. Search can
+  // exclude them at the query, which is what keeps a PR that quotes a marker from blocking rung 4.
+  const { io, calls } = listIo([[]]);
   const bf = await bodyFile();
-  const out = await proposeIssue(io, process.env, { repo: REPO, source: KEY, title: TITLE, bodyFile: bf });
-  assert.equal(out.created, true, 'a PR with the same title/body does not block a proposal');
-  assert.ok(calls.some((c) => c.method === 'POST' && c.path.endsWith('/issues')));
+  await proposeIssue(io, process.env, { repo: REPO, source: KEY, title: TITLE, bodyFile: bf });
+  const queries = calls.filter((c) => c.method === 'GET').map((c) => new URL(`https://api.github.com${c.path}`).searchParams.get('q') ?? '');
+  assert.equal(queries.length, 2, 'one query per leg');
+  for (const q of queries) assert.match(q, /(^| )is:issue( |$)/, `every leg is issue-only: ${q}`);
 });
 
 test('input validation: bad source key, empty body file, empty title all refuse', async () => {
@@ -201,4 +210,41 @@ test('a body that already carries the marker is not double-marked; findExistingP
   assert.equal((create.body as { body: string }).body.split(sourceMarker(KEY)).length - 1, 1);
   const none = await findExistingProposal(io, { repo: REPO, source: KEY, title: TITLE });
   assert.equal(none, null);
+});
+
+test('#1018: a match is found with ONE query, however large the repository has grown', async () => {
+  // The regression: the old dedupe walked /issues in pages of 100 and refused past 10 pages, so at
+  // ~1017 issues+pull requests it could no longer prove absence and rung 4 filed nothing at all.
+  // The search answers the same question with a bound repository growth cannot reach, so a match
+  // costs one request -- not eleven.
+  const existing = issueShaped({ number: 1100, title: 'filed long after the old window', body: `x\n\n${sourceMarker(KEY)}\n`, state: 'closed' });
+  const { io, calls } = listIo([[existing]]);
+  const bf = await bodyFile();
+  const out = await proposeIssue(io, process.env, { repo: REPO, source: KEY, title: TITLE, bodyFile: bf });
+  assert.equal(out.created, false);
+  assert.equal(out.existing?.issue, 1100);
+  assert.equal(out.existing?.by, 'source');
+  assert.equal(calls.filter((c) => c.method === 'GET').length, 1, 'the source leg answered on its first page');
+});
+
+test('#1018: an incomplete search answer fails closed - a partial miss proves nothing', async () => {
+  // `incomplete_results: true` is GitHub saying it timed out and the list is partial. Filing on it
+  // would recreate exactly the duplicate #881 exists to prevent.
+  const { io, calls } = listIo([[issueShaped({ number: 1, title: 'x', body: 'no marker' })]], { 0: { body: { total_count: 0, incomplete_results: true, items: [] } } });
+  const bf = await bodyFile();
+  await assert.rejects(
+    () => proposeIssue(io, process.env, { repo: REPO, source: KEY, title: TITLE, bodyFile: bf }),
+    /incomplete/,
+  );
+  assert.ok(!calls.some((c) => c.method === 'POST'), 'fail closed: nothing filed');
+});
+
+test('#1018: a search whose items cannot be read fails closed too', async () => {
+  const { io, calls } = listIo([[]], { 0: { body: { message: 'API rate limit exceeded' } } });
+  const bf = await bodyFile();
+  await assert.rejects(
+    () => proposeIssue(io, process.env, { repo: REPO, source: KEY, title: TITLE, bodyFile: bf }),
+    /without an items list/,
+  );
+  assert.ok(!calls.some((c) => c.method === 'POST'));
 });
