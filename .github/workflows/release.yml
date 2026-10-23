@@ -829,6 +829,24 @@ jobs:
               # `origin` carries the PAT from the checkout above; building a URL from the repository
               # name would authenticate as the GITHUB_TOKEN and be refused by the ruleset (#1029).
               if ! git push origin HEAD:main; then
+                # The release body was written BEFORE this push, and it says the Homebrew formula is
+                # live for this version. On a refused push that is false -- brew installs the previous
+                # one -- so correct the PUBLISHED body before failing: a reader of the release page is
+                # the audience that matters, not the Actions log (#1029 review).
+                {
+                  echo ""
+                  echo "## Homebrew was not updated for this release"
+                  echo ""
+                  echo "The push that updates \`Formula/mercury-ai.rb\` was refused by the branch"
+                  echo "protection rules on \`main\`, so \`brew install aywengo/mercury/mercury-ai\`"
+                  echo "still installs the PREVIOUS version. Any Homebrew statement above describes"
+                  echo "the channel, not this release."
+                  echo ""
+                  echo "The npm package and the asset attached here are unaffected. See #1029."
+                } >> "$notes"
+                if ! gh release edit "$tag" --notes-file "$notes"; then
+                  echo "::warning::could not annotate the release body with the Homebrew failure; the body still claims Homebrew is live" >&2
+                fi
                 echo "::error::Formula/mercury-ai.rb ${version} could not be pushed to main; Homebrew still installs the previous version. See #1029."
                 exit 1
               fi
