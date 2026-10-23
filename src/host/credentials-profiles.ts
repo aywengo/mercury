@@ -174,6 +174,16 @@ function validateProfile(raw: RawProfile, seenNames: Set<string>): CredentialPro
   const owners = (raw.owners as unknown[]).map((o) => {
     if (typeof o !== 'string' || o.trim() === '') throw new Error(`${where2}: owners entries must be non-empty strings`);
     if (o === '*' || o.includes('*')) throw new Error(`${where2}: owners must not contain wildcards ('${o}')`);
+    // Owner ids are compared LITERALLY against the caller's id (`bot-<alias>` for a bot, the token's
+    // owner for a human), so a placeholder can never match one -- and a profile that claims a
+    // repository while allowing no real owner refuses every Run against it (#1035). Whitespace,
+    // angle brackets, quotes and colons cannot appear in an id this host issues or reads.
+    if (/[\s<>"'`:]/.test(o)) {
+      throw new Error(
+        `${where2}: owners entry ${JSON.stringify(o)} contains characters no owner id can have`
+        + ' (whitespace, <>, quotes or :); owner ids are literal, e.g. \'bot-nightly\'',
+      );
+    }
     return o.trim();
   });
 
