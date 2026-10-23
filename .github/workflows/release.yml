@@ -314,9 +314,19 @@ jobs:
           # The gate asks the registry instead of hard-coding the package name, so it removes itself the
           # day @aywengo/mercury-fleet exists. A token still passes, because a token is exactly how that
           # first publish gets made.
+          # One three-digit answer, always. `curl -w '%{http_code}'` already writes `000` when the
+          # request fails, so an `|| echo 000` fallback appends a SECOND one and the notices built
+          # from it read `HTTP 000000` (or a two-line value) on a DNS or connection failure (#1045).
+          http_code() {
+            local code
+            code=$(curl -sS --max-time 30 -o /dev/null -w '%{http_code}' "$1" 2>/dev/null) || code=000
+            case "$code" in
+              [0-9][0-9][0-9]) printf '%s' "$code" ;;
+              *) printf '%s' 000 ;;
+            esac
+          }
           if [ "$product" = "fleet" ] && [ "${npm_auth_mode:-}" != "token" ]; then
-            if [ "$(curl -sS --max-time 30 -o /dev/null -w '%{http_code}' \
-              "https://registry.npmjs.org/${pkg_esc}" || echo 000)" = "404" ]; then
+            if [ "$(http_code "https://registry.npmjs.org/${pkg_esc}")" = "404" ]; then
               echo "refusing ${tag}: ${pkg_name} does not exist on the registry (HTTP 404)." >&2
               echo "  Fleet ships only through npm, so this tag would create a GitHub Release with no" >&2
               echo "  asset and then fail -- nothing installable." >&2
@@ -520,8 +530,7 @@ jobs:
             if grep -qE 'EPUBLISHCONFLICT|cannot publish over|previously published' "$npm_log"; then
               echo "  cause: ${product} ${version} is already on the registry. A version number cannot" >&2
               echo "         be reused; delete the tag and cut the next one." >&2
-            elif [ "$(curl -sS --max-time 30 -o /dev/null -w '%{http_code}' \
-                     "https://registry.npmjs.org/${pkg_esc}" || echo 000)" = "404" ]; then
+            elif [ "$(http_code "https://registry.npmjs.org/${pkg_esc}")" = "404" ]; then
               # The comment above says a rejected publisher and a nonexistent package look identical in
               # npm's log. They do -- but not to the registry, whose package metadata is public. One
               # request settles which this is, and the Fleet product makes the difference concrete:
@@ -571,9 +580,7 @@ jobs:
           # formula lives here rather than in a separate tap repo"). Probing aywengo/homebrew-tap --
           # which holds an unrelated product's formulae -- reported 404 for a channel that works, and
           # would have suppressed a true install path from every future release body.
-          formula_live=$(curl -sS --max-time 30 -o /dev/null -w '%{http_code}' \
-            "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/Formula/mercury-ai.rb" \
-            || echo 000)
+          formula_live=$(http_code "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/Formula/mercury-ai.rb")
           # Whether this VERSION is installable is a different fact from whether THIS RUN published
           # it, and the body is a promise to readers about the former. A publish can fail on a version
           # that is already on the registry -- a re-tag, or a version published outside CI -- and the
@@ -592,8 +599,7 @@ jobs:
           # word the one case the answer cannot explain on its own: a version the registry does not
           # serve, staged or not.
           npm_version_http() {
-            curl -sS --max-time 30 -o /dev/null -w '%{http_code}' \
-              "https://registry.npmjs.org/${pkg_esc}/${version}" || echo 000
+            http_code "https://registry.npmjs.org/${pkg_esc}/${version}"
           }
           # Probed on every path, including a rehearsal: the fail-last messages below read this answer,
           # and a rehearsal whose dry-run publish failed must report the registry's answer rather than
