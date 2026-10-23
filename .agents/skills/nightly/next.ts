@@ -25,7 +25,9 @@
  * comment, and the next night's report lists it.
  *
  * Subcommands:
- *   node next.ts run    [--repo owner/name] [--dry-run]
+ *   node next.ts run    [--repo owner/name] [--dry-run] [--skip-model-check]
+ *                       [--task <bot task>] [--model <id>] [--bot <alias>] [--bot-config <path>]
+ *                       [--base-url <url>] [--api-key <key>]
  *   node next.ts finish --repo owner/name --issue N
  *   node next.ts blocked --repo owner/name --issue N --reason "…"
  *   node next.ts propose --repo owner/name --source <key> --title "…" --body-file <path>  (#881)
@@ -35,6 +37,7 @@
 
 import { basename } from 'node:path';
 
+import { checkModel, defaultApiKey, defaultEndpoint, resolveTaskModel, type ModelCheck } from './model.ts';
 import { runSelectorWith } from './select.ts';
 import { assertRepo, ghToken, ghGet, ghPost, ghPatch, recordRunClaim, recordRunTerminal, FETCH_TIMEOUT_MS } from './shared.ts';
 
@@ -79,10 +82,66 @@ export interface NextSelection {
   action: 'fix-loop' | 'draft-proposals' | 'no-op';
 }
 
-/** Every entry point interpolates repo into API paths: one strict owner/name check. */
+/**
+ * The preflight failed, so NOTHING was claimed. Carries the record so the CLI can print it and the
+ * Run leaves a readable "model unavailable" line instead of an unexplained non-zero exit (#1040).
+ */
+export class ModelUnavailableError extends Error {
+  readonly record: ModelCheck;
+  constructor(record: ModelCheck) {
+    super(`model ${record.status}: ${record.model} at ${record.endpoint}${record.reason ? ` — ${record.reason}` : ''}; nothing claimed`);
+    this.name = 'ModelUnavailableError';
+    this.record = record;
+  }
+}
+
+export interface RunNextOptions {
+  repo: string;
+  dryRun: boolean;
+  /** The model the Run will use. When set (directly, or through `task`), the endpoint is checked
+   * BEFORE the ladder runs, because the ladder's last act is a CLAIM: a model that cannot answer
+   * must not leave an issue `nightly:in-progress` for the rest of the night. */
+  model?: string;
+  /** A bot task whose pinned `template.model` is the model to check (`--task nightly-next`). */
+  task?: string;
+  /** Test seam for the preflight. */
+  checkModel?: (model: string) => Promise<ModelCheck>;
+  /** Endpoint/key overrides, forwarded to the preflight (`--base-url`, `--api-key`). */
+  baseUrl?: string;
+  apiKey?: string;
+  /** Bot config overrides for the model pin (`--bot-config`, `--bot`). */
+  botConfig?: string;
+  bot?: string;
+}
+
+/**
+ * Refuse to go on when the model endpoint cannot answer. Throws `ModelUnavailableError` (which
+ * carries the record) on any non-ok result; does nothing when no model is named.
+ *
+ * Exported separately because the CLI must run it BEFORE it builds the GitHub transport: a dead
+ * model server should be reported as such, not as "GH_TOKEN is missing" (#1040 review).
+ */
+export async function preflightModel(opts: {
+  model?: string;
+  task?: string;
+  baseUrl?: string;
+  apiKey?: string;
+  botConfig?: string;
+  bot?: string;
+  checkModel?: (model: string) => Promise<ModelCheck>;
+}): Promise<void> {
+  const model = opts.model ?? (opts.task ? resolveTaskModel(opts.task, { configPath: opts.botConfig, bot: opts.bot }) : undefined);
+  if (model === undefined) return;
+  const run = opts.checkModel ??
+    ((m: string) => checkModel({ model: m, baseUrl: opts.baseUrl ?? defaultEndpoint(), apiKey: opts.apiKey ?? defaultApiKey() }));
+  const check = await run(model);
+  if (check.status !== 'ok') throw new ModelUnavailableError(check);
+}
+
 /** Run the ladder (with claim) and report what the agent should do. */
-export async function runNext(io: NextIo, env: NodeJS.ProcessEnv, opts: { repo: string; dryRun: boolean }): Promise<NextSelection> {
+export async function runNext(io: NextIo, env: NodeJS.ProcessEnv, opts: RunNextOptions): Promise<NextSelection> {
   assertRepo(opts.repo);
+  await preflightModel(opts);
   const selection = await runSelectorWith(
     {
       // Fail loud on non-2xx reads: the selector assumes its transport throws (its own ghGet
@@ -341,18 +400,37 @@ function realIo(env: NodeJS.ProcessEnv): NextIo {
 
 // ---- CLI ----
 
-const isMain = process.argv[1] && import.meta.url.endsWith(basename(process.argv[1]));
+const isMain = process.argv[1] !== undefined && import.meta.url.endsWith(basename(process.argv[1]));
 if (isMain) {
   const args = process.argv.slice(2);
   const cmd = args[0];
   const flag = (name: string): string | undefined => {
     const i = args.indexOf(name);
-    return i >= 0 ? args[i + 1] : undefined;
+    if (i < 0) return undefined;
+    const value = args[i + 1];
+    if (value === undefined || value.startsWith('--')) throw new Error(`${name} requires a value`);
+    return value;
   };
-  const repo = flag('--repo') ?? process.env.REPO ?? '';
   const work = (async (): Promise<unknown> => {
+    const repo = flag('--repo') ?? process.env.REPO ?? '';
     if (cmd === 'run') {
-      return await runNext(realIo(process.env), process.env, { repo, dryRun: args.includes('--dry-run') });
+      const dryRun = args.includes('--dry-run');
+      // The model preflight is ON by default: the whole point is that a crashed server must not
+      // cost a claim, and a guard the caller has to remember to request protects nothing (#1040
+      // review M1). `--dry-run` writes nothing, so it skips; `--skip-model-check` is the explicit
+      // escape hatch (no bot config on this host, a deliberately offline probe).
+      const skip = args.includes('--skip-model-check') || dryRun;
+      // BEFORE realIo(): building the GitHub transport demands a token, and "GH_TOKEN is missing" is
+      // the wrong report for a night whose model server is down.
+      await preflightModel(skip ? {} : {
+        model: flag('--model'),
+        task: flag('--task') ?? 'nightly-next',
+        baseUrl: flag('--base-url'),
+        apiKey: flag('--api-key'),
+        botConfig: flag('--bot-config'),
+        bot: flag('--bot'),
+      });
+      return await runNext(realIo(process.env), process.env, { repo, dryRun });
     }
     if (cmd === 'finish') {
       const issue = Number(flag('--issue'));
@@ -379,6 +457,9 @@ if (isMain) {
   work
     .then((out) => { process.stdout.write(JSON.stringify(out) + '\n'); })
     .catch((e: unknown) => {
+      // The preflight record goes to STDOUT as the one JSON line, so a failed night leaves a
+      // machine-readable reason next to the human message (#1040).
+      if (e instanceof ModelUnavailableError) process.stdout.write(JSON.stringify(e.record) + '\n');
       console.error(String(e instanceof Error ? e.message : e));
       process.exit(1);
     });

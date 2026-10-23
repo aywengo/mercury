@@ -74,8 +74,9 @@ The bot config implementing this schedule is #742
 Run-create body, so the Run records a per-Run model (#823) and the adapter passes it to the agent.
 The host pins it there rather than relying on the CLI's own default: a nightly Run is unattended, so
 a default that changes under it changes what the night does, and the model that produced a PR is
-then not the model in any config. The operator's current pin is `GLM-5.3-Flash-oQ8e-mtp` (omlx) on
-all three tasks. `prime-agent models` lists the ids the CLI accepts; `primeagent` declares
+then not the model in any config. The operator's current pin is `Qwen3.8-27B-MLX-bf16-mtp` (omlx) on
+all three tasks — chosen because it fits beside the interactive model in the same memory ceiling;
+`GLM-5.3-Flash-oQ8e-mtp` needed more than the ceiling allowed while that model was resident. `prime-agent models` lists the ids the CLI accepts; `primeagent` declares
 `perRunModel: true`, so the value reaches `--model`. A config change is read **once at bot start** —
 restart the bot (`launchctl kickstart -k gui/$(id -u)/com.mercury.bot.nightly`) or the running
 process keeps the old schedule.
