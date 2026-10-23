@@ -38,7 +38,7 @@ Record: [`docs/host-installer.md`](docs/host-installer.md)
 | #636 | M5: lifecycle — mercury host status/upgrade/uninstall + re-run guard | done | #637 |
 | #638 | M6: release hardening — bats suite, installer CI matrix, checksum, install docs | done | #639 |
 | #929 | Host installer: the four "gate open" milestones (M1, M3, M4, M6) are verification work… | open | — |
-| #1029 | release: the formula push to main is refused by the ruleset, so every release leaves Homebrew… | in progress | #1046 |
+| #1029 | release: the formula push to main is refused by the ruleset, so every release leaves Homebrew… | done | #1046 |
 
 ## Nightly self-development
 
