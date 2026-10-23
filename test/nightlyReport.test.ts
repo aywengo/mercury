@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { runReport, collectBlocked, collectRunsStopped, collectFlakes, flakesInWindow, blockingQuestion, questionFromBody, defaultNight, collectIssuesCommented, nightWindow, NIGHT_END, scanNightRuns, unpushedCommitsFrom, loadedSkillVersion, compareVersions, staleSkillsNote, runMatchesRepo, collectRunsWithoutTerminalCall, type ReportIo, type NightRun } from '../.agents/skills/nightly/report.ts';
+import { runReport, collectBlocked, collectRunsStopped, collectFailedRuns, collectFlakes, flakesInWindow, blockingQuestion, questionFromBody, defaultNight, collectIssuesCommented, nightWindow, NIGHT_END, scanNightRuns, unpushedCommitsFrom, loadedSkillVersion, compareVersions, staleSkillsNote, runMatchesRepo, collectRunsWithoutTerminalCall, type ReportIo, type NightRun } from '../.agents/skills/nightly/report.ts';
 import { recordRunClaim, recordRunTerminal } from '../.agents/skills/nightly/shared.ts';
 import { localDateString } from '../.agents/skills/nightly/e2e.ts';
 import { tempDir } from './helpers.ts';
@@ -1719,4 +1719,63 @@ test('#1024 review r2: the version line is rendered on a CURRENT night too, not 
   assert.ok(first.includes('host Mercury 0.2.2'), 'the host version is stated on a current night');
   assert.ok(first.includes('1.4.0'), 'and the procedure version the night loaded');
   assert.ok(!first.includes('Stale'), 'without a false staleness warning');
+});
+
+test('#1042: FAILED runs of the night are listed with their reason, not hidden behind _none_', async () => {
+  // A model outage fails Runs before they open a PR, comment, or release a claim, so every other
+  // section of the digest says _none_ and the night looks quiet. This section names them.
+  const io: ReportIo = {
+    mercury: {
+      async get(path) {
+        if (path.startsWith('/api/runs?status=FAILED')) {
+          return {
+            body: {
+              runs: [
+                { id: 'run_a', task: 'nightly-next 2026-09-26: take the top rung', status: 'FAILED', createdAt: '2026-09-26T00:10:00', error: '507 Cannot load GLM: projected memory 637GB would exceed the ceiling\nsecond line' },
+                { id: 'run_prev', task: 'nightly-next 2026-09-25: take the top rung', status: 'FAILED', createdAt: '2026-09-25T00:10:00', error: 'yesterday' },
+                { id: 'run_noerror', task: 'nightly-e2e 2026-09-26', status: 'FAILED', createdAt: '2026-09-26T00:05:00', error: null },
+              ],
+            },
+            status: 200,
+          };
+        }
+        return { body: [], status: 200 };
+      },
+    },
+    async get() { return { body: [], status: 200 }; },
+    async post() { return { body: { number: 900 }, status: 201 }; },
+    async patch() { return { body: {}, status: 200 }; },
+  };
+  const failed = await collectFailedRuns(io.mercury!, '2026-09-26');
+  assert.deepEqual(failed.map((r) => r.runId), ['run_a', 'run_noerror'], 'only this night\'s failures');
+  assert.match(failed[0]!.error ?? '', /^507 Cannot load GLM/, 'the reason is the first line only');
+  assert.doesNotMatch(failed[0]!.error ?? '', /second line/);
+  assert.equal(failed[1]!.error, undefined, 'a run with no error still appears, without a dash');
+
+  const { io: ghIo, calls } = ioWith({});
+  const out = await runReport({ ...ghIo, mercury: io.mercury }, ENV, { repo: REPO, night: '2026-09-26', dryRun: false });
+  assert.equal(out.runsFailed.length, 2);
+  const created = calls.find((c) => c.method === 'POST' && c.path.endsWith('/issues'))!;
+  const body = String((created.body as { body: string }).body);
+  assert.match(body, /## Runs that failed/);
+  assert.match(body, /run_a/);
+  assert.match(body, /507 Cannot load GLM/);
+  assert.doesNotMatch(body, /run_prev/, 'another night\'s failure is not this night\'s');
+});
+
+test('#1042: a failed runs listing degrades to an empty section, like the stopped-runs scan', async () => {
+  let calls = 0;
+  const io: ReportIo = {
+    mercury: {
+      async get(path) {
+        if (path.startsWith('/api/runs?')) { calls += 1; throw new Error('ECONNREFUSED'); }
+        return { body: [], status: 200 };
+      },
+    },
+    async get() { return { body: [], status: 200 }; },
+    async post() { return { body: {}, status: 201 }; },
+    async patch() { return { body: {}, status: 200 }; },
+  };
+  assert.deepEqual(await collectFailedRuns(io.mercury!, '2026-09-26'), []);
+  assert.equal(calls, 1, 'one attempt, no crash');
 });
