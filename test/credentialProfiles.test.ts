@@ -105,6 +105,36 @@ test('owners: non-empty, no wildcards (#784)', () => {
   assert.throws(() => loadCredentialProfiles(writeProfiles(dir, wild)), /must not contain wildcards/);
 });
 
+test('#1035: an owner id that can never match is refused, and a real one still loads', () => {
+  // The night of 2026-10-22 -> 23 was lost to `owners: ["<the nightly bot's owner id>"]`: the entry
+  // passed validation, the profile then claimed the repository while allowing no real owner, and every
+  // Run the bot created was refused 403. Owner ids are compared literally, so these are placeholders
+  // in every case -- reject them where the operator can still see the message.
+  const dir = tempDir('cp2-owner-placeholder-');
+  for (const placeholder of [
+    "<the nightly bot's owner id>",
+    'bot nightly',
+    'bot-nightly:nightly',
+    '"bot-nightly"',
+    '`bot-nightly`',
+    'bot<nightly>',
+  ]) {
+    const bad = { profiles: [{ ...VALID.profiles[0]!, owners: [placeholder] }] };
+    assert.throws(
+      () => loadCredentialProfiles(writeProfiles(dir, bad)),
+      /no owner id can have/,
+      `accepted the unmatchable owner id ${JSON.stringify(placeholder)}`,
+    );
+  }
+  // The ids this host actually issues must keep working: a bot alias, a plain human owner, and an
+  // email-shaped one (token owners are free-form outside the placeholder characters).
+  for (const real of ['bot-nightly', 'aywengo', 'Roman', 'ops@example.com', 'team.ops+ci']) {
+    const good = { profiles: [{ ...VALID.profiles[0]!, owners: [real] }] };
+    const loaded = loadCredentialProfiles(writeProfiles(dir, good));
+    assert.deepEqual(loaded.profiles[0]!.owners, [real], `refused the real owner id ${JSON.stringify(real)}`);
+  }
+});
+
 test('env: MERCURY_* names refused; values are exactly file or value (#784)', () => {
   const dir = tempDir('cp2-env-');
   const reserved = { profiles: [{ ...VALID.profiles[0]!, env: { MERCURY_DB: { value: 'x' } } }] };
