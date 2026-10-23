@@ -140,7 +140,7 @@ Record: [`docs/credential-profiles-design.md`](docs/credential-profiles-design.m
 | #899 | Credential profiles CP-6: sandbox per-profile opt-in for profile credentials | open | — |
 | #900 | Credential profiles CP-7: exact-value redaction of profile values, doctor checks, docs… | open | — |
 | #954 | Credential profiles: the three §15 open questions are live — decide the no-profile defa… | open | — |
-| #1035 | credentials validate: a placeholder owner id is accepted, and the profile then refuses every Run the bot creates | open | — |
+| #1035 | credentials validate: a placeholder owner id is accepted, and the profile then refuses every Run the bot creates | done | #1038 |
 
 ## Laya
 
