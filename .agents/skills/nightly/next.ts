@@ -25,7 +25,9 @@
  * comment, and the next night's report lists it.
  *
  * Subcommands:
- *   node next.ts run    [--repo owner/name] [--dry-run] [--task <bot task> | --model <id>]
+ *   node next.ts run    [--repo owner/name] [--dry-run] [--skip-model-check]
+ *                       [--task <bot task>] [--model <id>] [--bot <alias>] [--bot-config <path>]
+ *                       [--base-url <url>] [--api-key <key>]
  *   node next.ts finish --repo owner/name --issue N
  *   node next.ts blocked --repo owner/name --issue N --reason "…"
  *   node next.ts propose --repo owner/name --source <key> --title "…" --body-file <path>  (#881)
@@ -409,8 +411,8 @@ if (isMain) {
     if (value === undefined || value.startsWith('--')) throw new Error(`${name} requires a value`);
     return value;
   };
-  const repo = flag('--repo') ?? process.env.REPO ?? '';
   const work = (async (): Promise<unknown> => {
+    const repo = flag('--repo') ?? process.env.REPO ?? '';
     if (cmd === 'run') {
       const dryRun = args.includes('--dry-run');
       // The model preflight is ON by default: the whole point is that a crashed server must not
@@ -420,9 +422,9 @@ if (isMain) {
       const skip = args.includes('--skip-model-check') || dryRun;
       // BEFORE realIo(): building the GitHub transport demands a token, and "GH_TOKEN is missing" is
       // the wrong report for a night whose model server is down.
-      await preflightModel({
+      await preflightModel(skip ? {} : {
         model: flag('--model'),
-        task: skip ? flag('--task') : (flag('--task') ?? 'nightly-next'),
+        task: flag('--task') ?? 'nightly-next',
         baseUrl: flag('--base-url'),
         apiKey: flag('--api-key'),
         botConfig: flag('--bot-config'),

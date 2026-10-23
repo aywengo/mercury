@@ -16,7 +16,8 @@
  *   {"status":"unauthorized","model":"…","endpoint":"…","reason":"…"}
  *
  * Exit codes: 0 ok, 1 not usable (unreachable/timeout/unauthorized/5xx), 2 model not listed,
- * 64 usage. The caller decides what to do; `next.ts run --task` refuses to claim on any non-ok.
+ * 64 usage. The caller decides what to do; `next.ts run` refuses to claim on any non-ok (the check
+ * is on by default there, and `--skip-model-check` opts out).
  *
  * The model id is read from the bot config that RUNS the task (`template.model`), so the pin stays
  * in one place. The endpoint and key default to the operator's local oMLX; both are overridable.
