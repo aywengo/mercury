@@ -85,6 +85,9 @@ interface Run {
   stderr: string;
   npmrc: string;
   notesOut: string;
+  /** The body handed to the LAST `gh ... --notes-file`, i.e. what the release page shows when the
+   * step corrects it after a failed push (#1029). */
+  notesArg: string;
 }
 
 /** Run the workflow step for one tag, in a throwaway tree with stubbed `gh` and `npm`. */
@@ -97,7 +100,8 @@ function runTag(
     bundleLie?: string;
     exchange2?: string; exchange2Exit?: number; control?: string; controlExit?: number;
     control2?: string; control2Exit?: number; rehearsalProduct?: string; fleetPkgVersion?: string; omitFleetManifest?: boolean;
-    pkgVersionHttp?: string; pkgVersionHttpAfter?: number; installSh?: boolean; atlasPkgVersion?: string } = {},
+    pkgVersionHttp?: string; pkgVersionHttpAfter?: number; installSh?: boolean; atlasPkgVersion?: string;
+    gitPushFails?: boolean } = {},
 ): Run {
   // tempDir() registers the path with the file-level teardown in helpers.ts, which also runs when a
   // test file aborts partway -- something a per-test finally block cannot guarantee.
@@ -199,7 +203,12 @@ function runTag(
           // checking. A fleet or atlas rehearsal carries no --provenance, so without --dry-run here
           // no rehearsal could exercise a failed submission at all.
           + 'case "$*" in\n  *--provenance*|*--dry-run*) if [ -n "${STUB_NPM_SUBMIT_ERR:-}" ]; then printf "%s\\n" "${STUB_NPM_SUBMIT_ERR}" >&2; fi; exit "${STUB_NPM_SUBMIT_RC:-0}" ;;\nesac\nexit 0\n'
-        : `#!/bin/sh\necho "${cmd} $*" >> "${tmp}/calls.log"\nexit 0\n`;
+        // The gh stub records the calls AND keeps the last `--notes-file` it was handed, so a test can
+        // read the body a reader of the release page would actually see -- not just that `gh` ran
+        // (#1029 review: the failure path must correct the PUBLISHED body, not only the log).
+        : '#!/bin/sh\necho "' + cmd + ' $*" >> "' + tmp + '/calls.log"\n'
+          + 'prev=""; for a in "$@"; do [ "$prev" = "--notes-file" ] && cp "$a" "' + tmp + '/notes-arg.md"; prev="$a"; done\n'
+          + 'exit 0\n';
       writeFileSync(stub, body);
       chmodSync(stub, 0o755);
     }
@@ -271,6 +280,9 @@ function runTag(
     const gitStub = join(bin, 'git');
     writeFileSync(gitStub,
       '#!/bin/sh\necho "git $*" >> "' + tmp + '/calls.log"\n'
+      // STUB_GIT_PUSH_RC simulates the ruleset refusing the formula push (GH013). Without it the
+      // push always succeeds and the failure branch -- the one #1029 exists for -- never runs.
+      + 'case "$1" in push) exit "${STUB_GIT_PUSH_RC:-0}" ;; esac\n'
       + 'case "$1 $2" in "diff --cached") exit 1 ;; esac\nexit 0\n');
     chmodSync(gitStub, 0o755);
 
@@ -320,6 +332,7 @@ function runTag(
         STUB_EXCHANGE_MISSING: opts.missing ?? '',
         STUB_EXCHANGE_MISSING_EXIT: String(opts.missingExit ?? opts.exchangeExit ?? 0),
         STUB_PKG_HTTP: opts.pkgHttp ?? '200',
+        STUB_GIT_PUSH_RC: opts.gitPushFails ? '1' : '0',
         STUB_PKG_VERSION_HTTP: opts.pkgVersionHttp,
         // Answers the version probe 404 for this many probes, then 200: a packument catching up.
         STUB_PKG_VERSION_HTTP_AFTER: opts.pkgVersionHttpAfter === undefined ? undefined : String(opts.pkgVersionHttpAfter),
@@ -375,7 +388,8 @@ function runTag(
       ? (existsSync(join(tmp, 'docs', 'releases', opts.notes[0]))
         ? readFileSync(join(tmp, 'docs', 'releases', opts.notes[0]), 'utf8') : '')
       : '';
-    return { status: r.status, stdout: r.stdout + calls, stderr: r.stderr, npmrc, notesOut };
+    const notesArg = existsSync(join(tmp, 'notes-arg.md')) ? readFileSync(join(tmp, 'notes-arg.md'), 'utf8') : '';
+    return { status: r.status, stdout: r.stdout + calls, stderr: r.stderr, npmrc, notesOut, notesArg };
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -1697,4 +1711,45 @@ test('an unconfirmed version is not asserted absent', () => {
       `${code} must not be reported as a definitive absence:\n${r.notesOut}`);
     assert.match(r.notesOut, new RegExp(code), `${code} must be named so a reader can discount it`);
   }
+});
+
+test('#1029: the formula push uses the bypass identity, not the GITHUB_TOKEN', () => {
+  // `main` is protected (pull request + the `ci` check). The release job's last step commits
+  // Formula/mercury-ai.rb and pushes it, and on host-v0.2.3 that push was refused with GH013 AFTER
+  // npm had staged and the GitHub Release had been created -- so the release looked green while
+  // Homebrew stayed on 0.2.2. The fix is the same one plan-sync needed: check out with the operator
+  // PAT so the persisted git credential is the bypass identity, and push through that remote.
+  const wf = readFileSync(join(ROOT, '.github', 'workflows', 'release.yml'), 'utf8');
+  const checkout = wf.slice(wf.indexOf('- uses: actions/checkout@v4'), wf.indexOf('- uses: actions/setup-node@v4'));
+  assert.match(checkout, /token: \$\{\{ secrets\.OPERATOR_PAT \}\}/,
+    'the release job must check out with the bypass identity, or its formula push is refused by the ruleset');
+  assert.match(checkout, /persist-credentials: true/,
+    'the PAT must persist, since the formula push relies on the credential checkout wrote');
+  // A URL built from the repository name would authenticate as the GITHUB_TOKEN regardless.
+  assert.doesNotMatch(wf, /git push "https:\/\/github\.com\/\$\{GITHUB_REPOSITORY\}\.git"/,
+    'the formula push must not build its own remote URL: that drops the PAT and is refused');
+  assert.match(wf, /git push origin HEAD:main/);
+  // The comment that made this look safe must not come back.
+  assert.doesNotMatch(wf, /main is not branch-protected/,
+    'release.yml must not claim main is unprotected: the ruleset refuses a token push');
+  // And a refused push must say so, rather than leaving a green-looking release with a stale formula.
+  assert.match(wf, /could not be pushed to main; Homebrew still installs the previous version/);
+});
+
+test('#1029: a refused formula push corrects the PUBLISHED body, not just the log', () => {
+  // The body is written before the push, and it tells readers the Homebrew formula is live. On a
+  // refused push that is false: brew installs the previous version. The audience that matters is
+  // the release page, so the step must edit the body before failing.
+  const r = runTag(`host-v${V}`, {
+    notes: [`host/${V}.md`], oidc: true, npmToken: '', formulaHttp: '200', gitPushFails: true,
+  });
+  assert.equal(r.status, 1, 'a refused push still fails the job');
+  assert.match(r.stdout, /gh release edit/, 'the step must edit the published release');
+  assert.match(r.notesArg, /## Homebrew was not updated for this release/,
+    `the body a reader sees must say so:\n${r.notesArg}`);
+  assert.match(r.notesArg, /still installs the PREVIOUS version/);
+  assert.match(r.notesArg, /`brew install aywengo\/mercury\/mercury-ai`/, 'and name the channel it is about');
+  // And the same run with a successful push must NOT carry the correction.
+  const ok = runTag(`host-v${V}`, { notes: [`host/${V}.md`], oidc: true, npmToken: '', formulaHttp: '200' });
+  assert.ok(!/Homebrew was not updated/.test(ok.notesArg), 'a successful push must not be annotated');
 });

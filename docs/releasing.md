@@ -212,12 +212,20 @@ it from the tree at release time; nothing to do by hand.
 
 ## Publishing credential
 
-**There is none for the host, and that is the intended steady state.** Fleet's first publish is the one
+**There is none for the npm publish, and that is the intended steady state.** Fleet's first publish is the one
 exception and needs a credential, as the procedure above says; after that it needs none either. The host
 publishes through npm's trusted publishing: the workflow exchanges the GitHub Actions OIDC id-token for a short-lived credential, so no
 long-lived secret exists in the repository. `NPM_TOKEN` was deleted once trusted publishing was
 configured. The workflow still prefers `NPM_TOKEN` if the secret is ever re-added, and refuses the tag
 before creating any release if neither credential is available.
+
+**The formula push is the one place a bypass identity is required.** The job's last step commits
+`Formula/mercury-ai.rb` and pushes it to `main`, and `main` is protected by the ruleset (pull request plus
+the `ci` check). A push authenticated as the `GITHUB_TOKEN` is refused with `GH013`, *after* npm has staged
+and the GitHub Release has been created — the run goes red while `brew install` keeps installing the
+previous version (#1029, on `host-v0.2.3`). The release job therefore checks out with
+`secrets.OPERATOR_PAT`, so the persisted git credential is the bypass identity. If that secret is absent or
+lacks bypass, the formula step fails loudly and names the version Homebrew is still serving.
 
 ### Testing trusted publishing without publishing anything
 

@@ -44,6 +44,16 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The formula step at the end pushes a commit to `main`, and `main` IS protected: the
+          # ruleset requires a pull request and the `ci` check, so a push authenticated as the
+          # GITHUB_TOKEN is refused with GH013 -- AFTER npm has staged and the GitHub Release has
+          # been created, leaving Homebrew on the previous version (#1029, observed on host-v0.2.3).
+          # Check out with the operator PAT so the persisted git credential is the bypass identity,
+          # the same mechanism plan-sync uses; a remote override alone would not work, because
+          # checkout's persisted Authorization header takes precedence over a token in the URL.
+          token: ${{ secrets.OPERATOR_PAT }}
+          persist-credentials: true
 
       - uses: actions/setup-node@v4
         with:
@@ -799,9 +809,12 @@ jobs:
           # Publish the Homebrew formula LAST, and only once the asset it points at exists. A formula
           # committed before the release would 404 for anyone who ran brew install in the window, and a
           # formula pointing at an asset that was never uploaded fails checksum resolution with nothing
-          # to correlate it to. main is not branch-protected, so the contents:write token this job
-          # already has is sufficient -- no cross-repository credential is needed because the formula
-          # lives here rather than in a separate tap repo.
+          # to correlate it to.
+          #
+          # `main` IS branch-protected (ruleset: pull request + the `ci` check), so this push needs the
+          # bypass identity: the checkout above uses `secrets.OPERATOR_PAT` for exactly that reason
+          # (#1029). The formula lives in this repository rather than a separate tap, so no
+          # cross-repository credential is involved.
           if [ "${DRY_RUN:-}" = "true" ]; then
             echo "DRY RUN: not touching Formula/mercury-ai.rb (bundle sha256=${bundle_sha:-n/a})"
           elif [ "$product" = "host" ]; then
@@ -813,7 +826,30 @@ jobs:
               echo "Formula/mercury-ai.rb already at ${version}"
             else
               git commit -m "release: Homebrew formula ${version}"
-              git push "https://github.com/${GITHUB_REPOSITORY}.git" HEAD:main
+              # `origin` carries the PAT from the checkout above; building a URL from the repository
+              # name would authenticate as the GITHUB_TOKEN and be refused by the ruleset (#1029).
+              if ! git push origin HEAD:main; then
+                # The release body was written BEFORE this push, and it says the Homebrew formula is
+                # live for this version. On a refused push that is false -- brew installs the previous
+                # one -- so correct the PUBLISHED body before failing: a reader of the release page is
+                # the audience that matters, not the Actions log (#1029 review).
+                {
+                  echo ""
+                  echo "## Homebrew was not updated for this release"
+                  echo ""
+                  echo "The push that updates \`Formula/mercury-ai.rb\` was refused by the branch"
+                  echo "protection rules on \`main\`, so \`brew install aywengo/mercury/mercury-ai\`"
+                  echo "still installs the PREVIOUS version. Any Homebrew statement above describes"
+                  echo "the channel, not this release."
+                  echo ""
+                  echo "The npm package and the asset attached here are unaffected. See #1029."
+                } >> "$notes"
+                if ! gh release edit "$tag" --notes-file "$notes"; then
+                  echo "::warning::could not annotate the release body with the Homebrew failure; the body still claims Homebrew is live" >&2
+                fi
+                echo "::error::Formula/mercury-ai.rb ${version} could not be pushed to main; Homebrew still installs the previous version. See #1029."
+                exit 1
+              fi
             fi
           fi
 
