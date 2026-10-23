@@ -217,6 +217,7 @@ on Mercury's own Express app, so A1 can start.
 | #989 | Exposed-skill config, create-Run validation of every template, `host a2a validate` (A0-5) | open | — |
 | #1030 | test: a2aServer section 6.6 blocking-bound test is timing-flaky and can block a release PR | done | #1039 |
 | #1040 | nightly: a crashed model server still lets the Run claim an issue, so the night ends with 17 failed Runs and stale claims | done | #1041 |
+| #1042 | nightly report: a model outage makes the digest say _none_ everywhere, so a lost night reads as a quiet one | in progress | #1043 |
 
 ## Security follow-ups
 
