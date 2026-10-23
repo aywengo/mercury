@@ -4,9 +4,10 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+
+import { tempDir } from './helpers.ts';
 
 import {
   checkModel,
@@ -100,7 +101,7 @@ test('a 5xx is unreachable, and an unparseable listing is reported rather than a
 });
 
 test('the model comes from the bot task that runs it, so the pin has one home', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'nightly-model-'));
+  const dir = tempDir('nightly-model-');
   const path = join(dir, 'nightly.json');
   writeFileSync(path, JSON.stringify({
     schedule: { tasks: [
