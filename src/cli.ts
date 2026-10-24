@@ -68,7 +68,7 @@ import { installService, serviceStatus, uninstallService, parseServiceArgs, type
 import { loadEnvFile, runHostDoctor } from './host/doctor.ts';
 import { loadBotConfig, botConfigPath } from './host/bots/config.ts';
 import { installBotService, uninstallBotService, reassignBotRuns, parseBotServiceInstallArgs, parseBotServiceUninstallArgs } from './host/bots/service.ts';
-import { runBot, makeBotClient } from './host/bots/process.ts';
+import { runBot, makeSchedulerClient } from './host/bots/process.ts';
 import { dispatchTask } from './host/bots/dispatch.ts';
 import { statusView, renderStatus } from './host/bots/status.ts';
 import { botCredentialsPath, readBotCredentials, registeredOwnerForToken } from './host/bots/credentials.ts';
@@ -501,7 +501,9 @@ async function main(): Promise<void> {
     }
     try {
       const cfg = loadBotConfig(alias);
-      const client = makeBotClient(cfg);
+      // Same client the scheduler process would use: a `via: "fleet"` bot must not fire a manual
+      // dispatch onto its own host while its scheduled fires go through Fleet (#973).
+      const client = makeSchedulerClient(cfg);
       const decision = await dispatchTask(cfg, client, taskName, { nowMs: Date.now(), dryRun, yes });
       // The resolved plan (key + body) prints for a dry-run preview or a successful dispatch —
       // not on a refusal, where it would leak template material into terminals/logs.
@@ -544,7 +546,9 @@ async function main(): Promise<void> {
     }
     try {
       const cfg = loadBotConfig(alias);
-      const client = makeBotClient(cfg);
+      // Status reads the same list the single-flight check reads, so a fleet bot reports its Fleet
+      // Runs (owner=self), not its host's (#973).
+      const client = makeSchedulerClient(cfg);
       const nowMs = Date.now();
       const view = await statusView(cfg, client, nowMs);
       process.stdout.write(renderStatus(cfg, view, nowMs) + '\n');

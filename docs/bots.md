@@ -89,6 +89,7 @@ The field-by-field reference is §12 of the design. The essentials:
 | `schedule.tasks[].singleFlight` | default `true`: skip the fire while a Run of this task is non-terminal (NEEDS_INPUT included) |
 | `schedule.tasks[].onMiss` | `skip` (default), `collapse` (fire once for the newest missed minute) or `run` (each missed minute, capped by `maxCatchUp`) |
 | `api.url` / `api.timeoutMs` | default `http://127.0.0.1:${MERCURY_PORT:-3000}`, 30 s |
+| `api.via` | `"host"` (default) or `"fleet"`: dispatch through Fleet instead of this host, so Fleet decides which host runs the task. `"fleet"` needs a `fleet` token beside `api` in `bot-credentials.json`; `validate` refuses the config without it |
 
 Unknown keys are refused with a "did you mean" suggestion. A real-world example is
 [`deploy/nightly-bot.json.example`](../deploy/nightly-bot.json.example).

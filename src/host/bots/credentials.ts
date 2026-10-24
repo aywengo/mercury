@@ -1,7 +1,8 @@
 // Bot credentials: the bot-side copy of the bot's API token (§4.2).
 //
 // The token necessarily exists twice: the server authorizes it from MERCURY_API_TOKENS (mercury.env),
-// the bot presents it from bot-credentials.json. The file is per-host shared across bots — one JSON
+// the bot presents it from bot-credentials.json. The same file carries the optional Fleet caller
+// token (`fleet`) a bot needs when its config says `api.via: "fleet"` (#973). The file is per-host shared across bots — one JSON
 // object keyed by alias — so a bot only ever reads its own entry and never sees the host's whole
 // env file (which holds tokens for owners the bot has no business knowing).
 //
@@ -42,6 +43,13 @@ export function assertBotCredentialsSafe(path: string, platform: NodeJS.Platform
 export interface BotTokenPair {
   api?: string;
   llm?: string;
+  /**
+   * The Fleet caller token (FB2b, #973; docs/fleet-bots-design.md §6). Present only for a bot
+   * whose config says `api.via: "fleet"`: it is the credential Fleet authenticates the bot with,
+   * and it is deliberately a DIFFERENT secret from `api` — a Fleet token is scoped to hosts, a
+   * host token is scoped to one host's Runs.
+   */
+  fleet?: string;
 }
 
 /**
@@ -74,7 +82,7 @@ export function readBotCredentialsEntry(alias: string, env: NodeJS.ProcessEnv = 
   }
   const pair = entry as Record<string, unknown>;
   for (const key of Object.keys(pair)) {
-    if (key !== 'api' && key !== 'llm') {
+    if (key !== 'api' && key !== 'llm' && key !== 'fleet') {
       const s = key === 'token' ? " (did you mean 'api'?)" : '';
       throw new Error(`${path}: entry '${alias}' has unknown key '${key}'${s}`);
     }
@@ -90,7 +98,11 @@ export function readBotCredentialsEntry(alias: string, env: NodeJS.ProcessEnv = 
   if (typeof pair.api !== 'string') {
     throw new Error(`${path}: entry '${alias}.api' is required (the bot's Mercury API token)`);
   }
-  return { api: pair.api, ...(pair.llm !== undefined ? { llm: pair.llm as string } : {}) };
+  return {
+    api: pair.api,
+    ...(pair.llm !== undefined ? { llm: pair.llm as string } : {}),
+    ...(pair.fleet !== undefined ? { fleet: pair.fleet as string } : {}),
+  };
 }
 
 /**

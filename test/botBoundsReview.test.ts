@@ -82,7 +82,7 @@ const ROWS = reviewRows();
 const BY_ID = new Map(ROWS.map((r) => [r.id, r]));
 
 test('the design sources parse: §12 fields, §14 bounds and §15.5 mutations are all found', () => {
-  assert.equal(designConfigFields().length, 25, 'the §12 table changed shape; update the review and this count');
+  assert.equal(designConfigFields().length, 26, 'the §12 table changed shape; update the review and this count');
   assert.equal(designSecurityBounds().length, 9, 'the §14 list changed shape; update the review and this count');
   const section15 = DESIGN.slice(DESIGN.indexOf('## 15. Testing strategy'), DESIGN.indexOf('## 16. Open decisions'));
   for (const m of MUTATIONS) {

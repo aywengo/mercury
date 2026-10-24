@@ -14,6 +14,7 @@ import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { parseCron, parseTz } from './cron.ts';
+import { readBotCredentials } from './credentials.ts';
 
 /** The alias regex (§4.1): filesystem-safe, systemd-unit-safe, stable in log lines and owner ids. */
 export const BOT_ALIAS_RE = /^[a-z][a-z0-9-]{0,31}$/;
@@ -28,7 +29,11 @@ const TOP_LEVEL_KEYS = [
   'description', 'api', 'schedule', 'triggers', 'brain',
 ] as const;
 
-const API_KEYS = ['url', 'timeoutMs'] as const;
+const API_KEYS = ['url', 'timeoutMs', 'via'] as const;
+
+/** Where a bot dispatches: its own host (default) or through Fleet (FB2b, #973). */
+const API_VIA_VALUES = ['host', 'fleet'] as const;
+export type BotApiVia = (typeof API_VIA_VALUES)[number];
 
 const TASK_KEYS = [
   'name', 'cron', 'tz', 'template', 'singleFlight', 'onMiss', 'maxCatchUp', 'select',
@@ -96,7 +101,7 @@ export interface BotTaskConfig {
 export interface BotConfig {
   alias: string;
   description?: string;
-  api: { url?: string; timeoutMs?: number };
+  api: { url?: string; timeoutMs?: number; via?: BotApiVia };
   tasks: BotTaskConfig[];
   /** Human-readable findings that do not block use (e.g. the `run` + `singleFlight` warning). */
   warnings: string[];
@@ -230,6 +235,31 @@ function validateTask(path: string, raw: Record<string, unknown>, index: number,
   };
 }
 
+/**
+ * The `api.via: "fleet"` credential requirement (§6 of docs/fleet-bots-design.md, #973).
+ *
+ * The Fleet token lives in bot-credentials.json under the bot's alias, read through the SAME
+ * validated reader the bot uses at startup, so a config cannot pass validate and then fail on
+ * the first fire. Errors name the alias and the missing key, never a token value.
+ */
+function requireFleetToken(configPath: string, alias: string, env: NodeJS.ProcessEnv): void {
+  let fleet: string | undefined;
+  try {
+    fleet = readBotCredentials(alias, env).fleet;
+  } catch (err) {
+    // A missing/unsafe/unparseable credentials file is already a named, value-free error; keep it
+    // and name the field it is needed for, so the operator knows which way to fix it.
+    refuse(configPath, 'api.via', `via 'fleet' needs a Fleet token for alias '${alias}': ${(err as Error).message}`);
+  }
+  if (fleet === undefined || fleet === '') {
+    refuse(
+      configPath,
+      'api.via',
+      `via 'fleet' requires a 'fleet' token for alias '${alias}' in bot-credentials.json (add "${alias}": { "api": ..., "fleet": ... })`,
+    );
+  }
+}
+
 /** Load and validate one bot config by alias. Throws with a named field on any problem. */
 export function loadBotConfig(alias: string, env: NodeJS.ProcessEnv = process.env): BotConfig {
   // botConfigPath validates the alias (the same regex the caller-visible name obeys), so no
@@ -262,7 +292,7 @@ export function loadBotConfig(alias: string, env: NodeJS.ProcessEnv = process.en
     if (typeof root.description !== 'string') refuse(path, 'description', 'must be a string');
     description = root.description as string;
   }
-  let api: { url?: string; timeoutMs?: number } = {};
+  let api: { url?: string; timeoutMs?: number; via?: BotApiVia } = {};
   if (root.api !== undefined) {
     const apiRaw = checkObject(path, 'api', root.api);
     for (const key of Object.keys(apiRaw)) {
@@ -280,6 +310,19 @@ export function loadBotConfig(alias: string, env: NodeJS.ProcessEnv = process.en
       }
       api.timeoutMs = apiRaw.timeoutMs as number;
     }
+    if (apiRaw.via !== undefined) {
+      if (typeof apiRaw.via !== 'string' || !(API_VIA_VALUES as readonly string[]).includes(apiRaw.via)) {
+        refuse(path, 'api.via', `must be one of ${API_VIA_VALUES.join(', ')}`);
+      }
+      api.via = apiRaw.via as BotApiVia;
+    }
+  }
+  // `api.via: "fleet"` is unusable without Fleet's caller token, so it is refused HERE rather
+  // than at the first fire (docs/fleet-bots-design.md §6, #973): a config that validates must be
+  // one the bot can actually run. The check is skipped entirely for `via: "host"` and for a
+  // config without `via`, so neither reads bot-credentials.json at load — today's behaviour.
+  if (api.via === 'fleet') {
+    requireFleetToken(path, alias, env);
   }
   if (root.schedule === undefined) {
     refuse(path, 'schedule', 'required: a schedule-only bot (B1) must define schedule.tasks');

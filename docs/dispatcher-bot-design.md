@@ -76,8 +76,13 @@ flowchart LR
 
 - **Not** a new agent backend or adapter. Bots do not execute agent work; the
   worker and its adapters do (`src/adapters/` stays the only execution path).
-- **Not** Fleet. A bot sees and acts on exactly one host. Cross-host routing
-  stays Fleet's job (`fleet-design.md`); a bot must not blur that boundary.
+- **Not** Fleet. A bot keeps its schedule, triggers, brain and state on its own
+  host, and Fleet keeps placement and cross-host routing (`fleet-design.md`). A
+  bot may **dispatch through** Fleet (`api.via: "fleet"`, §5.2); that is still
+  Fleet deciding where work runs, never a bot making placement decisions — the
+  option A boundary drawn in [`fleet-bots-design.md`](fleet-bots-design.md) §4.
+  Option B (Fleet owning bot schedules) and option C (Fleet pushing bot configs)
+  stay rejected there.
 - **Not** a way to act on another owner's Runs. A bot may *read* across owners
   with the observer scope (§9) and may *escalate* what it sees by dispatching
   one of its own Runs. It never writes to a Run it does not own — not input,
@@ -187,9 +192,16 @@ An earlier draft claimed the bot token lives only in a 0600 credential file and
 ```text
 ${XDG_CONFIG_HOME:-~/.config}/mercury/bot-credentials.json
 {
-  "maint": { "api": "tok-bot-maint-...", "llm": "sk-..." }
+  "maint": { "api": "tok-bot-maint-...", "llm": "sk-...", "fleet": "tok-fleet-..." }
 }
 ```
+
+`fleet` is the Fleet caller token (§5.2, FB2b #973): required when the bot's
+config says `api.via: "fleet"` — `host bot validate` refuses such a config
+without it, naming the alias — and absent otherwise. It is a different secret
+from `api`: Fleet scopes it to the hosts the bot may use
+([`fleet-bots-design.md`](fleet-bots-design.md) §6), so it is never the host
+token reused.
 
 Rules:
 
@@ -300,6 +312,17 @@ and the server's idempotency path returns the original Run.
 > `idempotency-key is owner-scoped: same key, different owner -> different runs (issue #8)`,
 > `idempotency-key absent -> every POST creates a Run (#730, B0-2 contract)`),
 > so a route that stops forwarding the header fails CI.
+
+**Dispatch target (`api.via`).** With `api.via: "fleet"` (FB2b, #973) the same
+two calls go to Fleet instead of the host: `createRun` posts the template to
+`POST /fleet/runs` with the derived key as `Idempotency-Key` (201 created, 200
+replay — both map to the Fleet Run id), and the single-flight list reads
+`GET /fleet/runs?owner=self&limit=&cursor=`. Fleet scopes that list to the bot's
+own bindings, so another caller's non-terminal Run on the same host never blocks
+this bot, and a binding Fleet has not resolved (`UNKNOWN`) counts as
+non-terminal, so it blocks. Everything else — the key, the non-terminal
+deny-list, the state file — is unchanged: only the target moves
+([`fleet-bots-design.md`](fleet-bots-design.md) §4, §7).
 
 ### 5.3 singleFlight and missed fires
 
@@ -661,6 +684,7 @@ is not optional.
 | `description` | no | human label |
 | `api.url` | no | defaults to `http://127.0.0.1:${MERCURY_PORT:-3000}` |
 | `api.timeoutMs` | no | per-request deadline; default 30000 |
+| `api.via` | no | `host` (default) or `fleet` — dispatch through Fleet (§5.2, FB2b #973); `fleet` requires a `fleet` token in `bot-credentials.json` |
 | `schedule.tasks[].name` | yes (if tasks) | unique per bot, `[a-z0-9-]` |
 | `schedule.tasks[].cron` | yes | 5-field cron, **UTC unless `tz`** |
 | `schedule.tasks[].tz` | no | `"UTC"` (default), `"local"`, or fixed offset |

@@ -52,6 +52,11 @@ const ALLOWED_SRC = [
   'src/host/bots/service.ts',
   'src/host/bots/provision.ts',
   'src/host/bots/doctor.ts',
+  // The Fleet-bound scheduler client and the HTTP plumbing both clients share (#973, FB2b). It
+  // talks to Fleet over its public API only -- no `fleet/` import, which is what the boundary
+  // (§15 item 4) requires of a bot that dispatches through Fleet.
+  'src/host/bots/fleetClient.ts',
+  'src/host/bots/http.ts',
   // Host tooling (not server internals): the bot service commands reuse the same unit machinery
   // as `host service` (§10: "by the same machinery host service install uses").
   'src/host/service.ts',
