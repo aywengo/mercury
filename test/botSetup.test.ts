@@ -9,6 +9,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { tempDir } from './helpers.ts';
 import { botConfigPath, loadBotConfig, botsDir } from '../src/host/bots/config.ts';
 import { apiTokenForOwner, botCredentialsPath, readBotCredentials, registeredOwnerForToken } from '../src/host/bots/credentials.ts';
@@ -22,6 +23,8 @@ import {
 } from '../src/host/bots/provision.ts';
 import { envDiff, envFilePath, runHostSetup, validateAnswers, type HostSetupAnswers } from '../src/host/setup.ts';
 import type { HarnessProbeResult } from '../src/host/probe.ts';
+
+const ROOT = join(import.meta.dirname, '..');
 
 function probeOk(...ids: string[]): HarnessProbeResult[] {
   return ids.map((id) => ({
@@ -271,4 +274,27 @@ test('wizard: other MERCURY_API_TOKENS entries survive the bots step', async () 
   const apiTokens = /MERCURY_API_TOKENS=(.*)/.exec(readFileSync(envPath, 'utf8'))?.[1];
   assert.equal(apiTokenForOwner(apiTokens, 'alice'), 'tok-alice');
   assert.equal(apiTokenForOwner(apiTokens, 'bot-maint'), readBotCredentials('maint', env).api);
+});
+
+test('the wizard\'s own next command works: `host bot validate` reads mercury.env, not the shell', () => {
+  // The starter config's description tells the operator to run `mercury host bot validate
+  // --alias <a>`; the summary tells them `MERCURY_API_TOKENS: <owner> registered`. Both are only
+  // true if validate reads the file the wizard wrote. It used to read `process.env` alone, so a
+  // correct install reported `agreement FAIL` to anyone who had not sourced mercury.env (#915).
+  const { env, dir } = botEnv();
+  mkdirSync(join(dir, 'mercury', 'bots'), { recursive: true });
+  const token = 'tok-bot-maint-0123456789abcdef0123456789abcdef';
+  writeFileSync(botConfigPath('maint', env), JSON.stringify(starterBotConfig('maint', 'primeagent')));
+  writeCredentials(dir, { maint: { api: token } });
+  writeFileSync(envFilePath(env), `MERCURY_API_TOKENS=${token}:bot-maint\n`, { mode: 0o600 });
+  const spawned = spawnSync(process.execPath, [join(ROOT, 'src', 'cli.ts'), 'host', 'bot', 'validate', '--alias', 'maint'], {
+    cwd: ROOT,
+    encoding: 'utf8',
+    timeout: 120_000,
+    // Deliberately no MERCURY_API_TOKENS: the operator's shell does not have one either.
+    env: { ...env, PATH: process.env.PATH ?? '' },
+  });
+  assert.equal(spawned.status, 0, `${spawned.stdout}${spawned.stderr}`);
+  assert.match(spawned.stdout, /agreement ok: both copies register owner 'bot-maint'/);
+  assert.ok(!spawned.stdout.includes(token), 'the token value never reaches the terminal');
 });

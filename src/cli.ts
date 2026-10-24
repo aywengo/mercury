@@ -63,9 +63,9 @@ import { dataPath } from './paths.ts';
 import { PresetRegistry } from './presets/presetRegistry.ts';
 import { runHostInstall } from './host/install.ts';
 import { runHostProbe } from './host/probe.ts';
-import { runHostSetup } from './host/setup.ts';
+import { envFilePath, runHostSetup } from './host/setup.ts';
 import { installService, serviceStatus, uninstallService, parseServiceArgs, type ServiceOptions } from './host/service.ts';
-import { runHostDoctor } from './host/doctor.ts';
+import { loadEnvFile, runHostDoctor } from './host/doctor.ts';
 import { loadBotConfig, botConfigPath } from './host/bots/config.ts';
 import { installBotService, uninstallBotService, reassignBotRuns, parseBotServiceInstallArgs, parseBotServiceUninstallArgs } from './host/bots/service.ts';
 import { runBot, makeBotClient } from './host/bots/process.ts';
@@ -362,6 +362,24 @@ async function main(): Promise<void> {
       return;
     }
     let failed = false;
+    /**
+     * The server-side token registry as the HOST will see it: `mercury.env` is the file
+     * `mercury host setup` writes and systemd/launchd load, so it wins over the shell that
+     * happens to run `validate`. The process environment stays the fallback for a host whose
+     * registry is exported rather than written (and for tests).
+     */
+    const apiTokensRegistry = (): string | undefined => {
+      const file = envFilePath();
+      if (existsSync(file)) {
+        try {
+          const fromFile = loadEnvFile(file).MERCURY_API_TOKENS;
+          if (fromFile !== undefined && fromFile !== '') return fromFile;
+        } catch {
+          // An unreadable env file is the doctor's finding to report, not validate's to crash on.
+        }
+      }
+      return process.env.MERCURY_API_TOKENS;
+    };
     // Config.
     try {
       const cfg = loadBotConfig(alias);
@@ -396,7 +414,11 @@ async function main(): Promise<void> {
         return;
       }
       try {
-        const owner = registeredOwnerForToken(token, process.env.MERCURY_API_TOKENS);
+        // The server reads this registry from mercury.env, and the wizard writes it there; the
+        // process environment is only how a running host sees it. Reading the file first is what
+        // makes `host bot validate` answer for the install it was just written by, instead of
+        // reporting drift to an operator whose shell has not sourced the file (#915).
+        const owner = registeredOwnerForToken(token, apiTokensRegistry());
         if (owner === null) {
           process.stdout.write(`agreement FAIL: the credentials token for '${alias}' is not registered in MERCURY_API_TOKENS\n`);
           failed = true;
