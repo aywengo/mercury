@@ -1037,9 +1037,9 @@ allowlist, an `input` action naming another owner's Run, an over-cap response,
 and nothing at all — the bot skips or drops, logs, and stays inside its budgets.
 The §15.3 injection case produces no action.
 
-### Milestone B4 — setup integration and hardening — proposed #915 (nightly rung 4, 2026-10-10)
+### Milestone B4 — setup integration and hardening — shipped (#915, 2026-10-24)
 
-*Issue set:* #915 (the whole milestone: `host setup` bots step, `host doctor` bots section, the §14 bounds review, operator docs). Filed last in the B-set because it installs what B0–B3 build; an operator may hold it until B2 (#906–#909) and B3 (#912) land. Drafted only; nothing starts until an operator relabels it `nightly:ready`.
+*Issue set:* #915 (the whole milestone: `host setup` bots step, `host doctor` bots section, the §14 bounds review, operator docs). Shipped on 2026-10-24: the wizard writes a scheduler-only bot's config and both token copies in one step, the doctor reports one line per configured bot, [`bots-bounds-review.md`](bots-bounds-review.md) walks every §12/§14 bound and §15.5 mutation, and [`bots.md`](bots.md) is the operator guide. B2 (#907–#909) and B3 (#912) remain proposed; the wizard refuses the observer and brain postures until they land.
 
 
 - `host setup` bots step (writing both token copies in one step, and stating the
