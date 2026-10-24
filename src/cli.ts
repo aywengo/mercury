@@ -61,6 +61,7 @@ import { Worker } from './worker/worker.ts';
 import { startServer } from './api/server.ts';
 import { dataPath } from './paths.ts';
 import { PresetRegistry } from './presets/presetRegistry.ts';
+import { WorkflowRegistry } from './workflows/workflowRegistry.ts';
 import { runHostInstall } from './host/install.ts';
 import { runHostProbe } from './host/probe.ts';
 import { envFilePath, runHostSetup } from './host/setup.ts';
@@ -993,6 +994,19 @@ async function main(): Promise<void> {
     knownAgents: Object.keys(gatedAdapters),
   });
 
+  // Builtin workflow templates (docs/crew/workflows.md section 3.1, issue #808). Built here for the
+  // same reason the preset registry is: the composition root is the one place that knows how a
+  // registry is assembled, and `RunService.workflowRegistry()` hands it to the W-3 routes. Without
+  // this, every host answered `GET /api/workflows` with 404 and rejected a Run's `workflow` block
+  // (issue #1078).
+  //
+  // `MERCURY_WORKFLOWS_DIR` makes the set a per-host decision rather than a property of the
+  // package: Fleet's routing filter places a workflow Run on a host that advertises that workflow,
+  // so a host must be able to carry a set another host does not (FB3, #974).
+  const workflows = new WorkflowRegistry(process.env.MERCURY_WORKFLOWS_DIR ?? dataPath('workflows'), {
+    presets,
+  });
+
   const runService = new RunService({
     db,
     runs,
@@ -1000,6 +1014,7 @@ async function main(): Promise<void> {
     skills,
     selector,
     presets,
+    workflows,
     knownAgents: Object.keys(gatedAdapters),
     agentCapabilities: () => agentCapabilities.snapshot(),
     goals,

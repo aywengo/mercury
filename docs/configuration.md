@@ -287,6 +287,21 @@ Claude MCP configuration is static for the process, not a generic per-Run
 Mercury capability. The Crew MCP design does not describe current behavior; it
 is future work.
 
+## Workflow templates
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `MERCURY_WORKFLOWS_DIR` | `<package>/workflows` | The advisory workflow templates THIS host serves |
+
+One directory per template (`<id>/workflow.json`), validated at load: a malformed
+template is reported with its findings and skipped, never half-used. The default
+ships `plan-implement-review`.
+
+Set the variable when a host must carry a different set from the package's. Fleet's
+availability filter places a workflow Run on a host that advertises that workflow, so
+"this host carries these templates" is a routing input, not a cosmetic preference
+(`docs/fleet-bots-design.md` §5).
+
 ## Declarative adapter registries
 
 | Variable | Default | Purpose |
