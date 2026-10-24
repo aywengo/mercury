@@ -972,6 +972,36 @@ test('every section is budget-bound: a huge blocked list cannot blow the body li
   assert.match(body, /omitted \(issue-body budget\)/);
 });
 
+test('#1026: the section order is pinned (recovery sections before Claims released)', async () => {
+  // #1026 item 5: the digestBody comment once claimed the two #1024 recovery sections render
+  // "right after the claims-released list"; they render BEFORE it, and no test pinned the order.
+  // The order is the (bounded) guarantee that the recovery data comes first when the shared
+  // 60 KB issue-body budget is running out, so every section heading is asserted, in order.
+  const { io, calls } = ioWith({});
+  await runReport(io, ENV, { repo: REPO, night: '2026-09-26', dryRun: false });
+  const created = calls.find((c) => c.method === 'POST' && c.path.endsWith('/issues'))!;
+  const body = String((created.body as { body: string }).body);
+  const order = [
+    '## PRs opened',
+    '## Issues filed',
+    '## Issues commented',
+    '## Runs that ended with unpushed commits',
+    '## nightly-next Runs that never called finish/blocked',
+    '## Claims released (Run ended with no PR and no comment)',
+    '## Blocked (nightly:blocked, waiting on a human)',
+    '## Runs stopped by notAfter (the 06:00 window end)',
+    '## Runs that failed',
+    '## Flakes (nightly-e2e clock)',
+  ];
+  let last = -1;
+  for (const heading of order) {
+    const idx = body.indexOf(heading);
+    assert.ok(idx >= 0, `section renders: ${heading}`);
+    assert.ok(idx > last, `${heading} must come after the previous section`);
+    last = idx;
+  }
+});
+
 test('a create returning 0/null/string is unidentifiable: hard error, nothing closed', async () => {
   for (const bad of [null, 0, '901', -5]) {
     const { io: base } = ioWith({
