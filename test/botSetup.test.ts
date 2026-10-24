@@ -298,3 +298,18 @@ test('the wizard\'s own next command works: `host bot validate` reads mercury.en
   assert.match(spawned.stdout, /agreement ok: both copies register owner 'bot-maint'/);
   assert.ok(!spawned.stdout.includes(token), 'the token value never reaches the terminal');
 });
+
+test('B4 review: the credentials file is replaced atomically at 0600 and other aliases survive', async () => {
+  const { writeFileAtomic0600 } = await import('../src/host/bots/provision.ts');
+  const { tempDir } = await import('./helpers.ts');
+  const { readdirSync, readFileSync, statSync, writeFileSync, chmodSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const dir = tempDir('b4-atomic-');
+  const p = join(dir, 'bot-credentials.json');
+  writeFileSync(p, JSON.stringify({ other: { api: 'tok-other' } }));
+  chmodSync(p, 0o644); // a drifted, too-open existing file
+  writeFileAtomic0600(p, JSON.stringify({ other: { api: 'tok-other' }, nightly: { api: 'tok-new' } }));
+  assert.equal(statSync(p).mode & 0o777, 0o600, 'replaced at 0600');
+  assert.deepEqual(JSON.parse(readFileSync(p, 'utf8')), { other: { api: 'tok-other' }, nightly: { api: 'tok-new' } });
+  assert.deepEqual(readdirSync(dir).filter((f) => f.endsWith('.tmp')), [], 'no temp file left behind');
+});

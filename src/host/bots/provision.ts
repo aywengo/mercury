@@ -21,8 +21,8 @@
 //    operator sees the trade-off they would be accepting.
 
 import { randomBytes } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { chmodSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { BOT_ALIAS_RE, botConfigPath, botsDir } from './config.ts';
 import { apiTokenForOwner, botCredentialsPath, readBotCredentialsEntry, upsertBotTokenInApiTokens, type BotTokenPair } from './credentials.ts';
 import { botOwnerId } from './keys.ts';
@@ -184,14 +184,29 @@ export function writeBotProvision(plan: BotProvisionPlan, env: NodeJS.ProcessEnv
     }
     // The alias entry is absent (or the file is new) whenever this branch runs: an existing entry
     // would have supplied `plan.token` and been left unchanged. Other aliases are preserved.
-    writeFileSync(
-      plan.credentialsPath,
-      JSON.stringify({ ...existing, [plan.alias]: { api: plan.token } }, null, 2) + '\n',
-      { mode: 0o600 },
-    );
-    // writeFileSync's mode applies only at creation: repair a drifted file, as uninstall does.
-    chmodSync(plan.credentialsPath, 0o600);
+    // Atomic (temp + fsync + rename, created 0600): an in-place rewrite that crashed mid-write would
+    // truncate the file and lose every OTHER alias's credentials, and on an existing file the
+    // contents would land before the mode was repaired.
+    writeFileAtomic0600(plan.credentialsPath, JSON.stringify({ ...existing, [plan.alias]: { api: plan.token } }, null, 2) + '\n');
   }
+}
+
+/** Write `content` to `path` atomically with mode 0600: a temp file in the same directory, fsync,
+ *  rename. A crash leaves either the old file or the new one, never a truncated one. */
+export function writeFileAtomic0600(path: string, content: string): void {
+  const tmp = join(dirname(path), `.${process.pid}.${Date.now()}.tmp`);
+  const fd = openSync(tmp, 'wx', 0o600);
+  try {
+    writeFileSync(fd, content);
+    fsyncSync(fd);
+  } catch (err) {
+    closeSync(fd);
+    rmSync(tmp, { force: true });
+    throw err;
+  }
+  closeSync(fd);
+  renameSync(tmp, path);
+  chmodSync(path, 0o600);
 }
 
 /** A redacted, operator-facing summary of the bots step. Never includes the token value. */
