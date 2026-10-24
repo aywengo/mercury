@@ -2,6 +2,8 @@
 // Migrations are applied idempotently at startup (Mercury.md section 31, Persistence).
 
 import { DatabaseSync } from 'node:sqlite';
+import { mkdirSync } from 'node:fs';
+import { dirname } from 'node:path';
 
 export const MIGRATIONS: string[] = [
   // v1: initial schema
@@ -582,6 +584,11 @@ function enableWal(db: DatabaseSync): void {
 }
 
 export function openDatabase(path: string): DatabaseSync {
+  // The database's directory is part of what opening it creates: `host setup` writes
+  // mercury.env and prints the data dir without creating it, and a host installed with the
+  // documented `npm install -g` path has no installer log to create it as a side effect, so
+  // both services crash-looped on `unable to open database file` (issue #1074).
+  if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
   const db = new DatabaseSync(path);
   // Concurrent API + worker processes share the DB file (WAL). Without a busy
   // timeout (default 0), a writer that hits an in-flight tx from the other
