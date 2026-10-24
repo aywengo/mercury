@@ -1,6 +1,6 @@
 ---
 name: issue-fix-loop
-version: 1.5.0
+version: 1.6.0
 description: Fix a tracked issue through the proven per-issue loop — root-cause analysis, scoped fix with regression test, one PR, independent sub-agent review, then merge or hand-off (unattended Runs stop at a ready-for-review PR). Use when fixing a GitHub issue or any bug tracked as a unit of work.
 capabilities: [bugfix, issue, pull-request, review, workflow, regression]
 ---
@@ -17,7 +17,13 @@ capabilities: [bugfix, issue, pull-request, review, workflow, regression]
 5. Implement the issue's acceptance criteria — not every failure mode you can imagine (step 2).
 6. Stop and hand off (step 7) instead of guessing. An unfinished PR with a clear question beats
    a finished PR built on a guess.
-7. **A Run is not done until the work is PUSHED, the PR is commented, and the calling skill's
+7. **Identity: every GitHub write goes through the Run's own credential.** Use the tools this
+   repo provides (`next.ts propose`, `next.ts blocked`, `git push` of your branch, `gh pr …`), and
+   never create an issue with `gh issue create` or `gh api …/issues`. A tool shell's `gh` may carry
+   the HOST user's login rather than the Run's profile token — on 2026-10-23 four nightly proposals
+   were filed as the operator that way (#1060). If a command's `gh` reports an account other than
+   the bot identity, stop: say so and finish; do not write anything.
+8. **A Run is not done until the work is PUSHED, the PR is commented, and the calling skill's
    exit has run** (`finish` or `blocked`). A progress message, a "here is where I got to" summary
    or an end-of-turn note is NEVER a stopping point: a Run that commits and stops leaves its work
    in a worktree, and `run_84a35e1f57ae4df4` (2026-10-22) lost a night that way — Mercury recorded

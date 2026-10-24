@@ -394,6 +394,11 @@ the host, the identity, or the ruleset.
    `gh auth login` on the host user.
 4. **Bot token registered.** A `MERCURY_API_TOKENS` entry for `bot-nightly`
    exists, and `~/.config/mercury/bot-credentials.json` is mode 0600.
+3b. **The worker's OS user holds no GitHub credentials of its own (#1060).**
+   `mercury host doctor` reports `agent credentials: WARN` when it does. An agent harness may run
+   its tools in a kernel outside the per-Run environment, and a `gh` there falls back to the host
+   user's login — the 2026-10-23 night filed four proposals as the operator that way. Either run
+   the worker as a dedicated OS user (recommended), or `gh auth logout -h github.com` on the host.
 4a. **The rung-1 e2e gate is provisioned (#1010).** The nightly Run's
    credential profile carries `MERCURY_API_URL` (the host API, e.g.
    `{ "value": "http://127.0.0.1:3000" }`) and `MERCURY_API_TOKEN` (a
