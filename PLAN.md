@@ -223,6 +223,7 @@ on Mercury's own Express app, so A1 can start.
 | #1010 | nightly: the rung-1 e2e gate is permanently permissive because MERCURY_API_URL/TOKEN are never provisioned | done | #1049 |
 | #1051 | release: the workflow fails at checkout because the OPERATOR_PAT secret does not exist | done | #1052 |
 | #1053 | nightly: the dedupe search quotes its queries, so a title or marker with punctuation is never matched | done | #1054 |
+| #1060 | security: nightly Runs filed issues as the operator — an agent harness's tool shell falls back to the host user's gh login | in progress | #1061 |
 
 ## Security follow-ups
 

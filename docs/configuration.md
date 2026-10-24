@@ -218,6 +218,22 @@ no credential helper answers, and no environment variable turns that off. Keep n
 for a source-control host on a Mercury host, or treat such an entry as available to every Run.
 SSH credentials for a profile are CP-5's scope; in CP-4 profiles carry HTTPS credentials only.
 
+**Not covered: credentials an agent harness brings itself (#1060).** The layers above govern the
+environment Mercury builds and the process it spawns. They do not reach inside an agent harness: a
+harness that runs its tools in a kernel of its own — a daemon process started outside the Run —
+gives those tools the *daemon's* environment, not the Run's. A `gh` there reads
+`$HOME/.config/gh/hosts.yml`, and a `git` there reads the login keychain, so the Run acts as the
+worker's OS user. Measured on 2026-10-23: four nightly proposals were filed as the operator.
+
+The boundary is therefore: **CP-4 protects what Mercury starts; it cannot protect what the harness
+starts.** Two consequences:
+
+- `mercury host doctor` reports `agent credentials: WARN` when the worker's user has a `gh` login
+  or a `github.com` keychain entry, because that is exactly what a leak escalates to.
+- The recommended deployment is a **dedicated OS user for the worker** (design §12): with no
+  `gh` login, no keychain entry and no agent state of its own, a leaking tool shell fails instead
+  of acting as a person.
+
 ## PrimeAgent
 
 | Variable | Default | Purpose |

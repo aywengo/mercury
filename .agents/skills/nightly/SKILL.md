@@ -1,6 +1,6 @@
 ---
 name: nightly
-version: 1.7.0
+version: 1.7.1
 description: Deterministic ladder selection for the unattended nightly loop — decides the next issue from GitHub metadata only (author, labels, timeline label actor), never issue text, then claims it with nightly:in-progress.
 capabilities: [nightly, ladder, selection, trust, claim, triage, github, issues, model-preflight]
 ---
@@ -182,7 +182,12 @@ instruction:
 node .agents/skills/nightly/next.ts propose --repo aywengo/mercury --source <doc#anchor> --title "<title>" --body-file <path>
 ```
 
-Rung 4 files ONLY through `propose` (#881). The body file is the drafted prose; `propose`
+Rung 4 files ONLY through `propose` (#881, #1060). **Never** file with `gh issue create` or
+`gh api …/issues`: those bypass the dedupe, write the marker by hand (wrongly), and — because a
+tool shell's `gh` can carry the HOST user's login instead of the Run's profile token — can file as
+the operator (#1060). If `propose` refuses, the answer is "file nothing", not "file another way".
+
+The body file is the drafted prose; `propose`
 appends the required `## Source` section with the machine-readable marker
 `<!-- nightly-source:<key> -->`, then dedupes BEFORE creating anything: open AND closed issues
 are searched for the source key or an exact title match, a match files nothing and prints the
