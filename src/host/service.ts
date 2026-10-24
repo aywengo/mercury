@@ -32,7 +32,7 @@
 
 import { chmodSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 
 /** The service name used in unit ids and file names. */
@@ -108,6 +108,22 @@ export function launchdWorkerWrapperPath(env: NodeJS.ProcessEnv = process.env): 
   return join(base, 'mercury', 'run-worker.sh');
 }
 
+/**
+ * The `PATH` the generated services run with.
+ *
+ * Neither a systemd user unit nor a launchd agent reads a shell profile, so neither inherits
+ * `~/.local/bin` — which is where the npm installer puts `mercury` and where a harness installer
+ * puts `prime-agent`. Without it the worker spawns the agent, gets ENOENT, and every Run fails
+ * with exit code 127 (issue #1074). The resolved binary's own directory comes first, so the
+ * `mercury` the unit starts is the one `which mercury` found.
+ *
+ * `homeVar` is the platform's home placeholder: `%h` for systemd, `$HOME` for a shell wrapper.
+ */
+export function servicePath(mercuryBin: string, homeVar: string): string {
+  const dirs = [dirname(mercuryBin), `${homeVar}/.local/bin`, '/usr/local/bin', '/usr/bin', '/bin'];
+  return [...new Set(dirs)].join(':');
+}
+
 /** The systemd user unit text. Deterministic for the same inputs. */
 export function systemdUnit(mercuryBin: string, envFile: string): string {
   return `[Unit]
@@ -119,6 +135,7 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=%h
 EnvironmentFile=${envFile}
+Environment=PATH=${servicePath(mercuryBin, '%h')}
 ExecStart=${mercuryBin} server
 Restart=on-failure
 RestartSec=5
@@ -145,6 +162,7 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=%h
 EnvironmentFile=${envFile}
+Environment=PATH=${servicePath(mercuryBin, '%h')}
 ExecStart=${mercuryBin} worker
 Restart=on-failure
 RestartSec=5
@@ -164,6 +182,8 @@ export function launchdWrapper(mercuryBin: string, envFile: string): string {
 set -a
 source "${envFile}"
 set +a
+# launchd does not read a shell profile, so the user's bin is not on PATH (issue #1074).
+export PATH="${servicePath(mercuryBin, '$HOME')}:$PATH"
 exec "${mercuryBin}" server
 `;
 }
@@ -176,6 +196,8 @@ export function launchdWorkerWrapper(mercuryBin: string, envFile: string): strin
 set -a
 source "${envFile}"
 set +a
+# launchd does not read a shell profile, so the user's bin is not on PATH (issue #1074).
+export PATH="${servicePath(mercuryBin, '$HOME')}:$PATH"
 exec "${mercuryBin}" worker
 `;
 }
