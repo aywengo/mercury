@@ -8,6 +8,42 @@ and this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.5] - 2026-10-24
+
+A patch release about identity. `mercury host doctor` reports whether the worker's OS user holds
+GitHub credentials of its own; the nightly skill files proposals through a duplicate check that can
+find a punctuated title, and only through `propose`; and the documentation states the rule that a
+mis-provisioned host broke on 2026-10-23 — a credential profile's token must be the account it claims.
+
+### Added
+
+- **`host doctor` reports the worker user's GitHub credentials (#1060, PR #1061).** A new
+  `agent credentials: PASS|WARN` line (and an `agentCredentials` field in `--json`) reads
+  `gh auth status`'s output, names the account, and on macOS also reports a `github.com` internet
+  password in the login keychain. A host whose worker user is logged in to GitHub can hand a Run that
+  person's identity through any tool shell that falls back to `$HOME`.
+- **`deploy/dedicated-user.md`: running the host as its own OS user (#1060, PR #1062).** The macOS
+  migration (create the user, copy state, rewrite paths, system LaunchDaemons with `UserName`), the
+  Linux equivalent, the verification, and the rollback.
+
+### Changed
+
+- **A credential profile's token must be the identity it claims (#1060, PR #1063).** CP-4 injects the
+  profile's `GH_TOKEN` and the Run's tools use it, so a stale secret file silently makes every Run act
+  as whoever that token belongs to. `docs/configuration.md` states the rule with its one-line check;
+  `docs/operations.md` checklist item 3b makes it routine.
+- **`nightly` 1.7.1 / `issue-fix-loop` 1.6.0.** Proposals are filed only through `next.ts propose` or
+  `next.ts blocked`; a Run whose `gh` reports an account other than the bot identity stops instead of
+  writing.
+
+### Fixed
+
+- **Nightly duplicate detection by search terms, not a quoted title (#1053, PR #1054).** GitHub search
+  is token-based, so `in:title "<exact title>"` returned nothing for any title containing punctuation,
+  and the dedupe check read as "not filed yet". The source leg queries the source key and the title leg
+  queries its alphanumeric terms, both compared exactly client-side; an unreadable page, a cap hit or
+  an incomplete result still fails closed.
+
 ## [0.2.4] - 2026-10-23
 
 A patch release. Two host-side fixes protect what the host says about itself — a migration that claimed
