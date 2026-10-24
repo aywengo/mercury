@@ -8,6 +8,29 @@ and this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.7] - 2026-10-24
+
+A patch release that lets a fresh host actually execute a Run. 0.2.6 made the installer write the
+worker service; on a clean host the worker then found no harness, because neither a systemd user
+unit nor a launchd agent inherits `~/.local/bin`, and the npm install path had no data directory to
+open. Both are fixed here.
+
+### Fixed
+
+- **The service units set `PATH`, so the harness is found (#1074, PR #1075).** Neither a systemd
+  user unit nor a launchd agent reads a shell profile, so neither inherited `~/.local/bin` — where
+  the npm installer puts `mercury` and where a harness installer puts `prime-agent`. The worker
+  spawned the agent, got ENOENT, and every Run failed with `Agent exited with code 127`. Both units
+  now carry `Environment=PATH=<bin dir>:/usr/local/bin:/usr/bin:/bin`, and both launchd wrappers
+  export the same prefix. On a fresh Debian 13 container this turned
+  `smoke primeagent: FAIL - primeagent smoke run run_3866d473dd7441b0 FAILED` into
+  `smoke primeagent: PASS - primeagent smoke run run_c86b774630de4f1f completed`.
+- **Opening the database creates its directory (#1074, PR #1075).** `host setup` prints the data
+  dir without creating it, and `mercury server`/`worker` died on `unable to open database file`,
+  systemd restarting them forever. The `curl | bash` installer hid this by writing its log into that
+  directory; the documented `npm install -g` path had no such side effect. `openDatabase` now
+  creates the parent directory.
+
 ## [0.2.6] - 2026-10-24
 
 A patch release that makes a fresh host actually run. `mercury host service install` wrote one
