@@ -233,7 +233,7 @@ Record: [`docs/status.md`](docs/status.md)
 | #942 | security: GitHub revoked the nightly GH_TOKEN ('mercury-pat') after a PR-description le… | done | — |
 | #944 | redactor: session transcripts and kernel-state snapshots store Run secrets unredacted | done | #965 |
 | #976 | artifact redaction: sweep workspaces of runs the worker never finalized | open | — |
-| #1060 | security: the agent tool shell (python_repl kernel) does not inherit the Run environment; nightly Runs filed issues as the owner | in progress | #1061 |
+| #1060 | security: the agent tool shell (python_repl kernel) does not inherit the Run environment; nightly Runs filed issues as the owner | done | #1061, #1062 |
 
 ## Release workflow
 
