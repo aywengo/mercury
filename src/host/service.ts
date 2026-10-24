@@ -120,7 +120,12 @@ export function launchdWorkerWrapperPath(env: NodeJS.ProcessEnv = process.env): 
  * `homeVar` is the platform's home placeholder: `%h` for systemd, `$HOME` for a shell wrapper.
  */
 export function servicePath(mercuryBin: string, homeVar: string): string {
-  const dirs = [dirname(mercuryBin), `${homeVar}/.local/bin`, '/usr/local/bin', '/usr/bin', '/bin'];
+  const binDir = dirname(mercuryBin);
+  // The common case IS the user bin (`npm --prefix ~/.local`), so do not list it twice under
+  // two spellings: the resolved directory and the `%h/.local/bin` placeholder name the same path.
+  const dirs = binDir.endsWith('/.local/bin')
+    ? [binDir, '/usr/local/bin', '/usr/bin', '/bin']
+    : [binDir, `${homeVar}/.local/bin`, '/usr/local/bin', '/usr/bin', '/bin'];
   return [...new Set(dirs)].join(':');
 }
 

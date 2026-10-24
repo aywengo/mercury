@@ -45,7 +45,7 @@ test('systemdUnit: deterministic, loads mercury.env, runs the resolved binary', 
   assert.ok(unit.includes('ExecStart=/home/u/.local/bin/mercury server'));
   // A user unit does not read a shell profile, so the harness in ~/.local/bin is invisible
   // unless the unit says so (issue #1074).
-  assert.ok(unit.includes('Environment=PATH=/home/u/.local/bin:%h/.local/bin:'), 'the unit sets PATH');
+  assert.ok(unit.includes('Environment=PATH=/home/u/.local/bin:/usr/local/bin:/usr/bin:/bin'), 'the unit sets PATH, without listing the user bin twice');
   // `server` does not claim Runs (issue #1071), so a flag claiming otherwise would lie.
   assert.ok(!unit.includes('MERCURY_EMBEDDED_WORKER'));
   assert.ok(unit.includes('WantedBy=default.target'));
@@ -67,7 +67,7 @@ test('launchdWrapper: sources mercury.env and execs the binary', () => {
   const w = launchdWrapper('/home/u/.local/bin/mercury', '/home/u/.config/mercury/mercury.env');
   assert.ok(w.includes('source "/home/u/.config/mercury/mercury.env"'));
   assert.ok(w.includes('exec "/home/u/.local/bin/mercury" server'));
-  assert.ok(w.includes('export PATH="/home/u/.local/bin:$HOME/.local/bin:'), 'the wrapper exports PATH');
+  assert.ok(w.includes('export PATH="/home/u/.local/bin:/usr/local/bin:/usr/bin:/bin:$PATH"'), 'the wrapper exports PATH');
   assert.ok(!w.includes('MERCURY_EMBEDDED_WORKER'));
 });
 
@@ -75,7 +75,7 @@ test('systemdWorkerUnit: a second unit runs `mercury worker`, because `server` n
   const unit = systemdWorkerUnit('/home/u/.local/bin/mercury', '/home/u/.config/mercury/mercury.env');
   assert.ok(unit.includes('EnvironmentFile=/home/u/.config/mercury/mercury.env'));
   assert.ok(unit.includes('ExecStart=/home/u/.local/bin/mercury worker'));
-  assert.ok(unit.includes('Environment=PATH=/home/u/.local/bin:%h/.local/bin:'), 'the worker unit sets PATH too');
+  assert.ok(unit.includes('Environment=PATH=/home/u/.local/bin:/usr/local/bin:/usr/bin:/bin'), 'the worker unit sets PATH too');
   assert.ok(unit.includes('Restart=on-failure'));
   // The deploy/ unit's graceful-shutdown budget: SIGTERM requeues the in-flight Run (issue #51).
   assert.ok(unit.includes('TimeoutStopSec=45'));
@@ -90,7 +90,7 @@ test('launchdWorkerPlist and launchdWorkerWrapper: the worker agent has its own 
   const w = launchdWorkerWrapper('/home/u/.local/bin/mercury', '/home/u/.config/mercury/mercury.env');
   assert.ok(w.includes('exec "/home/u/.local/bin/mercury" worker'));
   assert.ok(w.includes('source "/home/u/.config/mercury/mercury.env"'));
-  assert.ok(w.includes('export PATH="/home/u/.local/bin:$HOME/.local/bin:'), 'the worker wrapper exports PATH');
+  assert.ok(w.includes('export PATH="/home/u/.local/bin:/usr/local/bin:/usr/bin:/bin:$PATH"'), 'the worker wrapper exports PATH');
 });
 
 // ---------- paths ----------
