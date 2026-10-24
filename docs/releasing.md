@@ -161,7 +161,12 @@ The procedure below stays for the next product that needs it.
 
 8. **A green run does not mean the version is installable.** The job submits with `npm stage publish`,
    which defers proof-of-presence to a maintainer, so `npm install` will not resolve the version until it
-   is approved. The release body names the id and gives the command:
+   is approved. The body does not infer that from the command, though: it asks the registry what it
+   serves for this version and writes the pending-approval notice only when the answer is "not served
+   yet". A staged version that is already live (approved minutes earlier, or published outside CI) is
+   left alone, and a direct `npm publish` that reported success while the registry does not serve the
+   version is disclosed as unconfirmed rather than described as awaiting approval. When it is pending,
+   the body names the id and gives the command:
 
    ```bash
    npm stage approve <stage-id>     # needs a 2FA code; run it locally
@@ -207,12 +212,27 @@ it from the tree at release time; nothing to do by hand.
 
 ## Publishing credential
 
-**There is none for the host, and that is the intended steady state.** Fleet's first publish is the one
+**There is none for the npm publish, and that is the intended steady state.** Fleet's first publish is the one
 exception and needs a credential, as the procedure above says; after that it needs none either. The host
 publishes through npm's trusted publishing: the workflow exchanges the GitHub Actions OIDC id-token for a short-lived credential, so no
 long-lived secret exists in the repository. `NPM_TOKEN` was deleted once trusted publishing was
 configured. The workflow still prefers `NPM_TOKEN` if the secret is ever re-added, and refuses the tag
 before creating any release if neither credential is available.
+
+**The formula push is the one place a bypass identity is required.** The job's last step commits
+`Formula/mercury-ai.rb` and pushes it to `main`, and `main` is protected by the ruleset (pull request plus
+the `ci` check). A push authenticated as the `GITHUB_TOKEN` is refused with `GH013`, *after* npm has staged
+and the GitHub Release has been created — the run goes red while `brew install` keeps installing the
+previous version (#1029, on `host-v0.2.3`). The release job therefore checks out with
+`secrets.OPERATOR_PAT`, so the persisted git credential is the bypass identity. If that secret is absent or
+lacks bypass, the formula step fails loudly and names the version Homebrew is still serving.
+
+**`OPERATOR_PAT` is a release precondition, and its absence is not fatal to the rest.** The checkout falls
+back to the `GITHUB_TOKEN` when the secret is unset, because `actions/checkout` refuses an empty `token`
+input and a release that dies at step 1 ships nothing at all — worse than a stale formula (#1051). With the
+fallback the release, its assets and the npm stage still run, the body discloses the Homebrew gap, and the
+log carries `::warning::OPERATOR_PAT is not set`. Set the secret before cutting a release you expect
+Homebrew to serve.
 
 ### Testing trusted publishing without publishing anything
 

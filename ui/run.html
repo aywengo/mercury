@@ -25,6 +25,9 @@
     <div class="row" style="margin-bottom:10px">
       <h2 style="margin:0" class="mono" id="run-id"></h2>
       <span id="status-badge"></span>
+      <!-- #1024: a Run that committed and never pushed. Beside the status badge, because the
+           status alone said COMPLETED and that was the whole problem. -->
+      <span id="unpushed-badge"></span>
       <!-- Goal status sits beside Run status and never replaces it: a COMPLETED run with an
            unmet goal has to show both words. -->
       <span id="goal-badge"></span>

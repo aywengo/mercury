@@ -25,7 +25,9 @@
  * comment, and the next night's report lists it.
  *
  * Subcommands:
- *   node next.ts run    [--repo owner/name] [--dry-run]
+ *   node next.ts run    [--repo owner/name] [--dry-run] [--skip-model-check]
+ *                       [--task <bot task>] [--model <id>] [--bot <alias>] [--bot-config <path>]
+ *                       [--base-url <url>] [--api-key <key>]
  *   node next.ts finish --repo owner/name --issue N
  *   node next.ts blocked --repo owner/name --issue N --reason "…"
  *   node next.ts propose --repo owner/name --source <key> --title "…" --body-file <path>  (#881)
@@ -35,8 +37,9 @@
 
 import { basename } from 'node:path';
 
-import { runSelectorWith } from './select.ts';
-import { assertRepo, ghToken, ghGet, ghPost, ghPatch, FETCH_TIMEOUT_MS } from './shared.ts';
+import { checkModel, defaultApiKey, defaultEndpoint, resolveTaskModel, type ModelCheck } from './model.ts';
+import { runSelectorWith, type E2eGateState } from './select.ts';
+import { assertRepo, ghToken, ghGet, ghPost, ghPatch, recordRunClaim, recordRunTerminal, FETCH_TIMEOUT_MS } from './shared.ts';
 
 const L_IN_PROGRESS = 'nightly:in-progress';
 const L_BLOCKED = 'nightly:blocked';
@@ -77,12 +80,71 @@ export interface NextSelection {
   /** What the AGENT (the Run) does next, per SKILL.md: run the issue-fix-loop on the claimed
    * issue, draft `nightly:proposed` issues from the docs (§6), or do nothing. */
   action: 'fix-loop' | 'draft-proposals' | 'no-op';
+  /** What the rung-1 e2e gate did (#1010): 'absent' means the host never supplied
+   *  `MERCURY_API_URL`/`MERCURY_API_TOKEN`, so rung 1 started without tonight's e2e verdict. */
+  e2eGate: E2eGateState;
 }
 
-/** Every entry point interpolates repo into API paths: one strict owner/name check. */
+/**
+ * The preflight failed, so NOTHING was claimed. Carries the record so the CLI can print it and the
+ * Run leaves a readable "model unavailable" line instead of an unexplained non-zero exit (#1040).
+ */
+export class ModelUnavailableError extends Error {
+  readonly record: ModelCheck;
+  constructor(record: ModelCheck) {
+    super(`model ${record.status}: ${record.model} at ${record.endpoint}${record.reason ? ` — ${record.reason}` : ''}; nothing claimed`);
+    this.name = 'ModelUnavailableError';
+    this.record = record;
+  }
+}
+
+export interface RunNextOptions {
+  repo: string;
+  dryRun: boolean;
+  /** The model the Run will use. When set (directly, or through `task`), the endpoint is checked
+   * BEFORE the ladder runs, because the ladder's last act is a CLAIM: a model that cannot answer
+   * must not leave an issue `nightly:in-progress` for the rest of the night. */
+  model?: string;
+  /** A bot task whose pinned `template.model` is the model to check (`--task nightly-next`). */
+  task?: string;
+  /** Test seam for the preflight. */
+  checkModel?: (model: string) => Promise<ModelCheck>;
+  /** Endpoint/key overrides, forwarded to the preflight (`--base-url`, `--api-key`). */
+  baseUrl?: string;
+  apiKey?: string;
+  /** Bot config overrides for the model pin (`--bot-config`, `--bot`). */
+  botConfig?: string;
+  bot?: string;
+}
+
+/**
+ * Refuse to go on when the model endpoint cannot answer. Throws `ModelUnavailableError` (which
+ * carries the record) on any non-ok result; does nothing when no model is named.
+ *
+ * Exported separately because the CLI must run it BEFORE it builds the GitHub transport: a dead
+ * model server should be reported as such, not as "GH_TOKEN is missing" (#1040 review).
+ */
+export async function preflightModel(opts: {
+  model?: string;
+  task?: string;
+  baseUrl?: string;
+  apiKey?: string;
+  botConfig?: string;
+  bot?: string;
+  checkModel?: (model: string) => Promise<ModelCheck>;
+}): Promise<void> {
+  const model = opts.model ?? (opts.task ? resolveTaskModel(opts.task, { configPath: opts.botConfig, bot: opts.bot }) : undefined);
+  if (model === undefined) return;
+  const run = opts.checkModel ??
+    ((m: string) => checkModel({ model: m, baseUrl: opts.baseUrl ?? defaultEndpoint(), apiKey: opts.apiKey ?? defaultApiKey() }));
+  const check = await run(model);
+  if (check.status !== 'ok') throw new ModelUnavailableError(check);
+}
+
 /** Run the ladder (with claim) and report what the agent should do. */
-export async function runNext(io: NextIo, env: NodeJS.ProcessEnv, opts: { repo: string; dryRun: boolean }): Promise<NextSelection> {
+export async function runNext(io: NextIo, env: NodeJS.ProcessEnv, opts: RunNextOptions): Promise<NextSelection> {
   assertRepo(opts.repo);
+  await preflightModel(opts);
   const selection = await runSelectorWith(
     {
       // Fail loud on non-2xx reads: the selector assumes its transport throws (its own ghGet
@@ -109,6 +171,12 @@ export async function runNext(io: NextIo, env: NodeJS.ProcessEnv, opts: { repo: 
     opts.dryRun,
   );
   if (selection.rung === 0 || selection.rung === 1 || selection.rung === 2 || selection.rung === 3) {
+    // The Run ledger (#1024): record the claim so the morning report can name a Run that claimed
+    // work and never called `finish`/`blocked`. Best-effort - a selection is not worth failing
+    // over an unwritable state file - and skipped on --dry-run, which claims nothing.
+    if (!opts.dryRun) {
+      recordRunClaim(env, { runId: env.MERCURY_RUN_ID, issue: selection.issue, cwd: process.cwd(), repo: opts.repo });
+    }
     // Rung 0 (resume, #819) is fix-loop step 5: address the pending Copilot findings on the
     // PR the earlier night opened, one batched push, then the relay fetches the fresh review.
     return { ...selection, action: 'fix-loop' };
@@ -116,18 +184,26 @@ export async function runNext(io: NextIo, env: NodeJS.ProcessEnv, opts: { repo: 
   if (selection.rung === 4) {
     return { ...selection, action: 'draft-proposals' };
   }
-  return { rung: 'none', reason: selection.reason, action: 'no-op' };
+  return { rung: 'none', reason: selection.reason, action: 'no-op', e2eGate: selection.e2eGate };
 }
 
-/** The success exit path: the fix-loop finished (PR open/merged, or nothing actionable). */
-export async function finishIssue(io: NextIo, opts: { repo: string; issue: number }): Promise<{ removed: boolean }> {
+/** The success exit path: the fix-loop finished (PR open/merged, or nothing actionable).
+ *
+ * `env` is REQUIRED and has no `process.env` default on purpose (#1024 review r1): with a default,
+ * every caller that forgets it writes to the host's REAL Run ledger. Inside a nightly Run that
+ * means `npm test` -- which calls these exits with a fake io -- stamped the Run's own claim
+ * `finish`, so the morning report could never list the Run it exists to catch. */
+export async function finishIssue(io: NextIo, opts: { repo: string; issue: number }, env: NodeJS.ProcessEnv): Promise<{ removed: boolean }> {
   assertRepo(opts.repo);
   const removed = await io.deleteLabel(`/repos/${opts.repo}/issues/${opts.issue}/labels/${encodeURIComponent(L_IN_PROGRESS)}`);
+  // The Run ledger (#1024): this is the terminal call the morning report looks for. Recorded even
+  // when the label was already gone - the exit path RAN, which is the fact the report reads.
+  recordRunTerminal(env, env.MERCURY_RUN_ID, 'finish');
   return { removed };
 }
 
 /** The never-asks exit path: hand the question to a human via GitHub, remove the claim, finish. */
-export async function blockIssue(io: NextIo, opts: { repo: string; issue: number; reason: string }): Promise<{ removed: boolean; newlyLabeled: boolean; commented: boolean }> {
+export async function blockIssue(io: NextIo, opts: { repo: string; issue: number; reason: string }, env: NodeJS.ProcessEnv): Promise<{ removed: boolean; newlyLabeled: boolean; commented: boolean }> {
   assertRepo(opts.repo);
   const reason = opts.reason.trim();
   if (reason === '') throw new Error('a blocked exit needs a non-empty --reason (the question a human must answer)');
@@ -167,6 +243,9 @@ export async function blockIssue(io: NextIo, opts: { repo: string; issue: number
     // Body marker is an optimization; the comment already carries the question.
   }
   const removed = await io.deleteLabel(`/repos/${opts.repo}/issues/${opts.issue}/labels/${encodeURIComponent(L_IN_PROGRESS)}`);
+  // The Run ledger (#1024): `blocked` IS a terminal call - the never-asks exit is a finished Run,
+  // and the report must not list it beside Runs that simply stopped mid-sentence.
+  recordRunTerminal(env, env.MERCURY_RUN_ID, 'blocked');
   return { removed, newlyLabeled, commented };
 }
 
@@ -212,38 +291,82 @@ export interface ExistingMatch { issue: number; state: string; by: 'source' | 't
  * window). A failed page, an unreadable page or a pagination-cap hit THROWS (fail closed, #881
  * acceptance 4): the caller files nothing and the report says the dedupe check could not run.
  * Pull requests are skipped. */
+/** GitHub's search API serves at most 1000 results (10 pages of 100) per query. Unlike a list
+ * walk, that bound does not grow with the repository: `is:issue` keeps pull requests out, and the
+ * query is the source marker or the exact title, so a full cap means the search itself is too
+ * broad to answer "does this exist" -- which is a failed search, not a reason to file. */
+export const MAX_SEARCH_PAGES = 10;
+
+
+/** GitHub search caps a query at 256 characters, and a long title does not fit. Tokens are ANDed
+ * (the default), so the first few distinctive words narrow the candidate set and the caller's exact
+ * comparison decides. Alphanumeric runs only: `§15` becomes `15`, `<!--` disappears, and punctuation
+ * cannot make the query unmatchable (#1053). */
+export function titleTerms(title: string, budget = 200): string {
+  const terms: string[] = [];
+  for (const term of title.toLowerCase().split(/[^a-z0-9]+/)) {
+    if (term === '') continue;
+    if ([...terms, term].join(' ').length > budget) break;
+    terms.push(term);
+  }
+  return terms.join(' ');
+}
+
 export async function findExistingProposal(io: NextIo, opts: { repo: string; source: string; title: string }): Promise<ExistingMatch | null> {
   const marker = sourceMarker(opts.source);
   const title = opts.title.trim();
   if (title === '') throw new Error('a proposal needs a non-empty --title');
-  let listPath: string | null = `/repos/${opts.repo}/issues?state=all&per_page=100`;
-  for (let page = 0; page < 10 && listPath; page++) {
-    const res = await io.get(listPath);
-    if (res.status < 200 || res.status >= 300) {
-      throw new Error(`dedupe search failed: GET ${listPath} -> ${res.status}; nothing is filed`);
-    }
-    // `shared.ts` returns `body: null` when a 200 response cannot be decoded, and `?? []` read that
-    // as "this page listed nothing": the scan found no match, the walk reached its end, and
-    // `proposeIssue` filed a duplicate. An unreadable page is a failed search like any other --
-    // throw, so the caller files nothing. `Array.isArray` also refuses a JSON object body (an error
-    // payload served with a 200), which `?? []` passed to `for...of` as an unhelpful TypeError.
-    if (!Array.isArray(res.body)) {
-      throw new Error(`dedupe search failed: GET ${listPath} -> ${res.status} returned a body that is not a list; the page could not be read, so nothing is filed (fail closed, #881)`);
-    }
-    const items = res.body as { number: number; title?: string; body?: string | null; state?: string; pull_request?: unknown }[];
-    for (const it of items) {
-      if (it.pull_request) continue;
-      if (typeof it.body === 'string' && it.body.includes(marker)) {
-        return { issue: it.number, state: it.state ?? 'unknown', by: 'source' };
+  // Two legs, both over issues only (a pull request quoting the marker is not a proposal):
+  //   * the source KEY, as a phrase;
+  //   * the title's terms, ANDed.
+  // Both are then compared EXACTLY client-side (marker substring, trimmed title equality).
+  //
+  // Neither query may be the marker or the whole title as a quoted phrase: GitHub search is
+  // token-based, so `"<!-- nightly-source:k -->"` and a title containing `§`, `—` or `:` match
+  // nothing at all -- measured on #954, whose exact title returned total_count 0 while the term
+  // query below finds it (#1053). A phrase query that silently finds nothing is worse than no
+  // search, because it reads as "not filed yet".
+  //
+  // The list endpoint was the first choice (#928) because a list walk has no index lag, but it
+  // counts PAGES over every issue AND pull request in the repository: at ~1000 items the walk
+  // could no longer prove absence and #881's fail-closed rule turned rung 4 into a permanent
+  // no-op (#1018). Search answers the same question with a bound that repo growth cannot reach.
+  const legs: { by: 'source' | 'title'; q: string }[] = [
+    { by: 'source', q: `repo:${opts.repo} is:issue "${opts.source}"` },
+    { by: 'title', q: `repo:${opts.repo} is:issue in:title ${titleTerms(title)}` },
+  ];
+  for (const leg of legs) {
+    let path: string | null = `/search/issues?q=${encodeURIComponent(leg.q)}&per_page=100`;
+    for (let page = 0; page < MAX_SEARCH_PAGES && path; page++) {
+      const res = await io.get(path);
+      if (res.status < 200 || res.status >= 300) {
+        throw new Error(`dedupe search failed: GET ${path} -> ${res.status}; nothing is filed`);
       }
-      if (typeof it.title === 'string' && it.title.trim() === title) {
-        return { issue: it.number, state: it.state ?? 'unknown', by: 'title' };
+      // `shared.ts` returns `body: null` when a 200 response cannot be decoded. An unreadable
+      // answer is a failed search like any other -- throw, so the caller files nothing.
+      const payload = res.body as { items?: unknown; incomplete_results?: unknown } | null;
+      if (!payload || typeof payload !== 'object' || !Array.isArray(payload.items)) {
+        throw new Error(`dedupe search failed: GET ${path} -> ${res.status} returned a body without an items list; the answer could not be read, so nothing is filed (fail closed, #881)`);
       }
-    }
-    const next = res.link?.match(/<([^>]+)>;\s*rel="next"/)?.[1] ?? null;
-    listPath = next ? next.replace('https://api.github.com', '') : null;
-    if (page === 9 && listPath) {
-      throw new Error('dedupe search hit its 10-page cap; the remaining issues were not checked, so nothing is filed (fail closed, #881)');
+      // `incomplete_results` means the search timed out and its answer is partial: a miss proves
+      // nothing, so filing on it would be exactly the duplicate #881 exists to prevent.
+      if (payload.incomplete_results === true) {
+        throw new Error(`dedupe search was incomplete (incomplete_results: true) for ${leg.by}; the answer cannot prove absence, so nothing is filed (fail closed, #881)`);
+      }
+      const items = payload.items as { number: number; title?: string; body?: string | null; state?: string }[];
+      for (const it of items) {
+        if (leg.by === 'source' && typeof it.body === 'string' && it.body.includes(marker)) {
+          return { issue: it.number, state: it.state ?? 'unknown', by: 'source' };
+        }
+        if (leg.by === 'title' && typeof it.title === 'string' && it.title.trim() === title) {
+          return { issue: it.number, state: it.state ?? 'unknown', by: 'title' };
+        }
+      }
+      const next = res.link?.match(/<([^>]+)>;\s*rel="next"/)?.[1] ?? null;
+      path = next ? next.replace('https://api.github.com', '') : null;
+      if (page === MAX_SEARCH_PAGES - 1 && path) {
+        throw new Error(`dedupe search hit its ${MAX_SEARCH_PAGES}-page cap (1000 results) on the ${leg.by} leg; the remaining results were not checked, so nothing is filed (fail closed, #881, cap: MAX_SEARCH_PAGES in .agents/skills/nightly/next.ts)`);
+      }
     }
   }
   return null;
@@ -324,23 +447,42 @@ function realIo(env: NodeJS.ProcessEnv): NextIo {
 
 // ---- CLI ----
 
-const isMain = process.argv[1] && import.meta.url.endsWith(basename(process.argv[1]));
+const isMain = process.argv[1] !== undefined && import.meta.url.endsWith(basename(process.argv[1]));
 if (isMain) {
   const args = process.argv.slice(2);
   const cmd = args[0];
   const flag = (name: string): string | undefined => {
     const i = args.indexOf(name);
-    return i >= 0 ? args[i + 1] : undefined;
+    if (i < 0) return undefined;
+    const value = args[i + 1];
+    if (value === undefined || value.startsWith('--')) throw new Error(`${name} requires a value`);
+    return value;
   };
-  const repo = flag('--repo') ?? process.env.REPO ?? '';
   const work = (async (): Promise<unknown> => {
+    const repo = flag('--repo') ?? process.env.REPO ?? '';
     if (cmd === 'run') {
-      return await runNext(realIo(process.env), process.env, { repo, dryRun: args.includes('--dry-run') });
+      const dryRun = args.includes('--dry-run');
+      // The model preflight is ON by default: the whole point is that a crashed server must not
+      // cost a claim, and a guard the caller has to remember to request protects nothing (#1040
+      // review M1). `--dry-run` writes nothing, so it skips; `--skip-model-check` is the explicit
+      // escape hatch (no bot config on this host, a deliberately offline probe).
+      const skip = args.includes('--skip-model-check') || dryRun;
+      // BEFORE realIo(): building the GitHub transport demands a token, and "GH_TOKEN is missing" is
+      // the wrong report for a night whose model server is down.
+      await preflightModel(skip ? {} : {
+        model: flag('--model'),
+        task: flag('--task') ?? 'nightly-next',
+        baseUrl: flag('--base-url'),
+        apiKey: flag('--api-key'),
+        botConfig: flag('--bot-config'),
+        bot: flag('--bot'),
+      });
+      return await runNext(realIo(process.env), process.env, { repo, dryRun });
     }
     if (cmd === 'finish') {
       const issue = Number(flag('--issue'));
       if (!repo || !Number.isInteger(issue) || issue <= 0) throw new Error('usage: next.ts finish --repo <owner/name> --issue <n>');
-      return await finishIssue(realIo(process.env), { repo, issue });
+      return await finishIssue(realIo(process.env), { repo, issue }, process.env);
     }
     if (cmd === 'propose') {
       const source = flag('--source') ?? '';
@@ -355,13 +497,27 @@ if (isMain) {
       const issue = Number(flag('--issue'));
       const reason = flag('--reason') ?? '';
       if (!repo || !Number.isInteger(issue) || issue <= 0) throw new Error('usage: next.ts blocked --repo <owner/name> --issue <n> --reason "<question>"');
-      return await blockIssue(realIo(process.env), { repo, issue, reason });
+      return await blockIssue(realIo(process.env), { repo, issue, reason }, process.env);
     }
     throw new Error('usage: next.ts run|finish|blocked|propose --repo <owner/name> [--dry-run] [--issue <n>] [--reason "..."] [--source <doc#anchor>] [--title "..."] [--body-file <path>]');
   })();
   work
-    .then((out) => { process.stdout.write(JSON.stringify(out) + '\n'); })
+    .then((out) => {
+      // The gate's STATE is printed next to its answer (#1010). The boolean alone cannot tell a
+      // provisioned host from an unprovisioned one, so an absent gate was invisible in the Run's
+      // events for as long as nobody compared the host's environment to the docs.
+      const gate = (out as { e2eGate?: string }).e2eGate;
+      if (gate === 'absent') {
+        console.error('e2e gate: absent — MERCURY_API_URL/MERCURY_API_TOKEN are not in this Run\'s environment, so rung 1 is NOT gated on tonight\'s e2e verdict (docs/operations.md §"Running the nightly bot", #1010)');
+      } else if (gate === 'half-configured' || gate === 'unevaluable') {
+        console.error(`e2e gate: ${gate} — the gate is configured but could not be evaluated; rung 1 fails closed`);
+      }
+      process.stdout.write(JSON.stringify(out) + '\n');
+    })
     .catch((e: unknown) => {
+      // The preflight record goes to STDOUT as the one JSON line, so a failed night leaves a
+      // machine-readable reason next to the human message (#1040).
+      if (e instanceof ModelUnavailableError) process.stdout.write(JSON.stringify(e.record) + '\n');
       console.error(String(e instanceof Error ? e.message : e));
       process.exit(1);
     });

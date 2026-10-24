@@ -1711,3 +1711,39 @@ test('#980: a capped check-runs scan fails the red-ci signal closed (no resume, 
   const s = await runSelectorWith(io as never, { REPO: 'aywengo/mercury' }, true);
   assert.notEqual(s.rung, 0, 'unknown CI state never fakes a red-ci resume');
 });
+
+test('#1010: the gate reports its STATE, so "passed" and "never checked" stop being the same value', async () => {
+  const { e2eGate } = await import('../.agents/skills/nightly/select.ts');
+  // The defect: an unprovisioned host passed rung 1 forever, and nothing said so. The answer stays
+  // permissive (an unconfigured gate is a deliberate opt-out), but the STATE names it.
+  assert.deepEqual(await e2eGate({}), { terminal: true, state: 'absent' });
+  assert.deepEqual(await e2eGate({ MERCURY_API_URL: 'http://127.0.0.1:9' }), { terminal: false, state: 'half-configured' });
+  assert.deepEqual(await e2eGate({ MERCURY_API_TOKEN: 't' }), { terminal: false, state: 'half-configured' });
+  assert.deepEqual(
+    await e2eGate({ MERCURY_API_URL: 'http://127.0.0.1:9', MERCURY_API_TOKEN: 't' }),
+    { terminal: false, state: 'unevaluable' },
+    'unreachable host: configured, and it could not be read',
+  );
+  // A reachable host with no e2e Run tonight: configured, and it was actually checked.
+  const { createServer } = await import('node:http');
+  const srv = createServer((_req, res) => { res.statusCode = 200; res.setHeader('content-type', 'application/json'); res.end(JSON.stringify({ runs: [] })); });
+  await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
+  const addr = srv.address();
+  const url = `http://127.0.0.1:${typeof addr === 'object' && addr ? addr.port : 0}`;
+  try {
+    assert.deepEqual(await e2eGate({ MERCURY_API_URL: url, MERCURY_API_TOKEN: 't' }), { terminal: true, state: 'configured' });
+  } finally {
+    srv.close();
+  }
+});
+
+test('#1010: the selector carries the gate state into its answer', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const io = {
+    get: async () => ({ body: [], link: null }),
+    post: async () => true,
+    del: async () => true,
+  };
+  const sel = await runSelectorWith(io, { REPO: 'aywengo/mercury' }, true);
+  assert.equal(sel.e2eGate, 'absent', 'a host without the two variables must say so in the answer');
+});

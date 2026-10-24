@@ -85,6 +85,9 @@ interface Run {
   stderr: string;
   npmrc: string;
   notesOut: string;
+  /** The body handed to the LAST `gh ... --notes-file`, i.e. what the release page shows when the
+   * step corrects it after a failed push (#1029). */
+  notesArg: string;
 }
 
 /** Run the workflow step for one tag, in a throwaway tree with stubbed `gh` and `npm`. */
@@ -97,7 +100,8 @@ function runTag(
     bundleLie?: string;
     exchange2?: string; exchange2Exit?: number; control?: string; controlExit?: number;
     control2?: string; control2Exit?: number; rehearsalProduct?: string; fleetPkgVersion?: string; omitFleetManifest?: boolean;
-    pkgVersionHttp?: string; installSh?: boolean; atlasPkgVersion?: string } = {},
+    pkgVersionHttp?: string; pkgVersionHttpAfter?: number; installSh?: boolean; atlasPkgVersion?: string;
+    gitPushFails?: boolean } = {},
 ): Run {
   // tempDir() registers the path with the file-level teardown in helpers.ts, which also runs when a
   // test file aborts partway -- something a per-test finally block cannot guarantee.
@@ -193,11 +197,18 @@ function runTag(
           + '    chmod +x "$prefix/node_modules/.bin/atlas"\n'
           + '    exit 0 ;;\n'
           + 'esac\n'
-          // Scoped to the submission: --provenance appears only on the publish/stage call. Failing
-          // on every npm call instead also killed `npm ci`, which made three tests fail for a reason
-          // that had nothing to do with what they were checking.
-          + 'case "$*" in\n  *--provenance*) if [ -n "${STUB_NPM_SUBMIT_ERR:-}" ]; then printf "%s\\n" "${STUB_NPM_SUBMIT_ERR}" >&2; fi; exit "${STUB_NPM_SUBMIT_RC:-0}" ;;\nesac\nexit 0\n'
-        : `#!/bin/sh\necho "${cmd} $*" >> "${tmp}/calls.log"\nexit 0\n`;
+          // Scoped to the submission: --provenance appears on the real publish/stage call and
+          // --dry-run on the rehearsal's. Failing on every npm call instead also killed `npm ci`,
+          // which made three tests fail for a reason that had nothing to do with what they were
+          // checking. A fleet or atlas rehearsal carries no --provenance, so without --dry-run here
+          // no rehearsal could exercise a failed submission at all.
+          + 'case "$*" in\n  *--provenance*|*--dry-run*) if [ -n "${STUB_NPM_SUBMIT_ERR:-}" ]; then printf "%s\\n" "${STUB_NPM_SUBMIT_ERR}" >&2; fi; exit "${STUB_NPM_SUBMIT_RC:-0}" ;;\nesac\nexit 0\n'
+        // The gh stub records the calls AND keeps the last `--notes-file` it was handed, so a test can
+        // read the body a reader of the release page would actually see -- not just that `gh` ran
+        // (#1029 review: the failure path must correct the PUBLISHED body, not only the log).
+        : '#!/bin/sh\necho "' + cmd + ' $*" >> "' + tmp + '/calls.log"\n'
+          + 'prev=""; for a in "$@"; do [ "$prev" = "--notes-file" ] && cp "$a" "' + tmp + '/notes-arg.md"; prev="$a"; done\n'
+          + 'exit 0\n';
       writeFileSync(stub, body);
       chmodSync(stub, 0o755);
     }
@@ -245,7 +256,10 @@ function runTag(
       + '    printf "%s" "$body"; exit "$code" ;;\n'
       // The tap is public too, and the release body now checks it before naming Homebrew as an
       // install path. Default 404, because that is what the tap actually returns today.
-      + '  *raw.githubusercontent.com*) if [ -n "${wfmt:-}" ]; then printf "%s" "${STUB_FORMULA_HTTP:-200}"; exit 0; fi; exit 22 ;;\n'
+      // A real failed curl prints `000` from -w AND exits nonzero, so the stub must do both:
+      // with `exit 0` a `|| echo 000` fallback never fires, which is how the doubled value
+      // in #1045 went unseen by the suite that exists to pin this text.
+      + '  *raw.githubusercontent.com*) if [ -n "${wfmt:-}" ]; then printf "%s" "${STUB_FORMULA_HTTP:-200}"; case "${STUB_FORMULA_HTTP:-200}" in 000) exit 7;; esac; exit 0; fi; exit 22 ;;\n'
       // Package metadata is public, and the failure classifier now reads it to tell a rejected
       // publisher apart from a package that has never existed. STUB_PKG_HTTP is that answer.
       // A VERSION url (…/<pkg>/<semver>) must be answerable separately from the package url: whether
@@ -253,14 +267,28 @@ function runTag(
       // now branches on the second. The default is 404, not the package probe's 200: a version whose
       // publish just failed is absent unless a test says otherwise, and defaulting it to 200 rewrote
       // every pre-existing "npm failed" test into the already-published branch.
-      + '  */[0-9]*.[0-9]*.[0-9]*) if [ -n "${wfmt:-}" ]; then printf "%s" "${STUB_PKG_VERSION_HTTP:-404}"; exit 0; fi; exit 22 ;;\n'
-      + '  *) if [ -n "${wfmt:-}" ]; then printf "%s" "${STUB_PKG_HTTP:-200}"; exit 0; fi; exit 22 ;;\n'
+      // The version probe is answered 404 until STUB_PKG_VERSION_HTTP_AFTER probes have gone by, which
+      // is how a test models a packument that lags a publish by a second or two: the answer changes
+      // between probes, and a step that reads only the first one is wrong about the version.
+      + '  */[0-9]*.[0-9]*.[0-9]*) if [ -n "${wfmt:-}" ]; then\n'
+      + '    n=0; [ -f "' + tmp + '/vprobe.count" ] && n=$(cat "' + tmp + '/vprobe.count");\n'
+      + '    n=$((n+1)); printf "%s" "$n" > "' + tmp + '/vprobe.count";\n'
+      + '    if [ -n "${STUB_PKG_VERSION_HTTP_AFTER:-}" ] && [ "$n" -gt "${STUB_PKG_VERSION_HTTP_AFTER}" ]; then\n'
+      // A real failed curl prints `000` from -w AND exits nonzero, so the stub must do both: with
+      // `exit 0` a `|| echo 000` fallback never fires, which is how the doubled value in #1045 went
+      // unseen by the suite that exists to pin this text.
+      + '      printf "%s" "${STUB_PKG_VERSION_HTTP_LATE:-200}"; exit 0; fi\n'
+      + '    printf "%s" "${STUB_PKG_VERSION_HTTP:-404}"; case "${STUB_PKG_VERSION_HTTP:-404}" in 000) exit 7;; esac; exit 0; fi; exit 22 ;;\n'
+      + '  *) if [ -n "${wfmt:-}" ]; then printf "%s" "${STUB_PKG_HTTP:-200}"; case "${STUB_PKG_HTTP:-200}" in 000) exit 7;; esac; exit 0; fi; exit 22 ;;\n'
       + 'esac\nexit 0\n');
     chmodSync(curlStub, 0o755);
 
     const gitStub = join(bin, 'git');
     writeFileSync(gitStub,
       '#!/bin/sh\necho "git $*" >> "' + tmp + '/calls.log"\n'
+      // STUB_GIT_PUSH_RC simulates the ruleset refusing the formula push (GH013). Without it the
+      // push always succeeds and the failure branch -- the one #1029 exists for -- never runs.
+      + 'case "$1" in push) exit "${STUB_GIT_PUSH_RC:-0}" ;; esac\n'
       + 'case "$1 $2" in "diff --cached") exit 1 ;; esac\nexit 0\n');
     chmodSync(gitStub, 0o755);
 
@@ -310,7 +338,10 @@ function runTag(
         STUB_EXCHANGE_MISSING: opts.missing ?? '',
         STUB_EXCHANGE_MISSING_EXIT: String(opts.missingExit ?? opts.exchangeExit ?? 0),
         STUB_PKG_HTTP: opts.pkgHttp ?? '200',
+        STUB_GIT_PUSH_RC: opts.gitPushFails ? '1' : '0',
         STUB_PKG_VERSION_HTTP: opts.pkgVersionHttp,
+        // Answers the version probe 404 for this many probes, then 200: a packument catching up.
+        STUB_PKG_VERSION_HTTP_AFTER: opts.pkgVersionHttpAfter === undefined ? undefined : String(opts.pkgVersionHttpAfter),
         STUB_FORMULA_HTTP: opts.formulaHttp ?? '200',
         STUB_EXCHANGE_OURS1: opts.exchange ?? '',
         STUB_EXCHANGE_OURS1_EXIT: String(opts.exchangeExit ?? 0),
@@ -363,7 +394,8 @@ function runTag(
       ? (existsSync(join(tmp, 'docs', 'releases', opts.notes[0]))
         ? readFileSync(join(tmp, 'docs', 'releases', opts.notes[0]), 'utf8') : '')
       : '';
-    return { status: r.status, stdout: r.stdout + calls, stderr: r.stderr, npmrc, notesOut };
+    const notesArg = existsSync(join(tmp, 'notes-arg.md')) ? readFileSync(join(tmp, 'notes-arg.md'), 'utf8') : '';
+    return { status: r.status, stdout: r.stdout + calls, stderr: r.stderr, npmrc, notesOut, notesArg };
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -762,10 +794,116 @@ test('a staged release says the npm package is awaiting approval', () => {
   assert.match(r.notesOut, /already live/, 'and must say the Homebrew path is unaffected');
 });
 
+test('a staged submission whose version the registry serves is not called pending', () => {
+  // #994, measured on host-v0.2.2. The step staged the package and the release body said the npm
+  // channel awaited maintainer approval, while the registry served 0.2.2 and `latest` pointed at it.
+  // Staging defers proof-of-presence, it does not defer it forever: approval can land within the
+  // minute, and a version published outside CI (or by an earlier run) is live before the staging
+  // command even runs. So the verb is not evidence about what a reader can install; the registry is.
+  const r = runTag(`host-v${V}`, { notes: [`host/${V}.md`], pkgVersionHttp: '200' });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /npm submission mode: stage publish/, 'this run still stages');
+  assert.ok(!/awaiting maintainer approval/.test(r.notesOut),
+    `a version the registry serves must not be described as pending:\n${r.notesOut}`);
+  assert.ok(!/will not resolve/.test(r.notesOut),
+    `the body must not tell a reader npm install fails for a version that is live:\n${r.notesOut}`);
+  assert.ok(!/does not serve/.test(r.notesOut),
+    `nothing is unconfirmed about a version the registry answered 200 for:\n${r.notesOut}`);
+});
+
+test('a direct publish the registry does not serve is disclosed, not called pending', () => {
+  // The other direction of the same rule. `npm publish` reported success and the registry answers 404
+  // for the version. Two lies are available here -- "install it" (the notes' own preamble) and
+  // "awaiting approval" (a staging state a direct publish never had) -- and the honest output is the
+  // observation itself, with the HTTP code it came from.
+  const r = runTag(`host-v${V}`, { notes: [`host/${V}.md`], directPublish: 'true', pkgVersionHttp: '404' });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.notesOut, /published, but not confirmed on the registry/,
+    `a successful publish the registry does not serve must be disclosed:\n${r.notesOut}`);
+  assert.match(r.notesOut, /does not serve it \(HTTP 404\)/, 'the body carries the answer it is based on');
+  assert.ok(!/awaiting maintainer approval/.test(r.notesOut),
+    `a direct publish was never staged, so nothing awaits approval:\n${r.notesOut}`);
+});
+
+test('a version probe that never answered is not reported as a 404', () => {
+  // curl writes no status on a failure and the step records 000. "The registry does not serve it" is a
+  // claim about the registry; 000 is a claim about the network, and the two lead an operator to
+  // different places. The step already draws this line for the formula probe; the npm section draws it
+  // too, on both branches that can see a non-404.
+  const staged = runTag(`host-v${V}`, { notes: [`host/${V}.md`], pkgVersionHttp: '000' });
+  assert.equal(staged.status, 0, staged.stderr);
+  assert.match(staged.notesOut, /could not confirm this version \(HTTP `000`\)/,
+    `an unanswered probe must be reported as unanswered:\n${staged.notesOut}`);
+  assert.ok(!/does not serve this version yet/.test(staged.notesOut),
+    `a probe that never answered must not be reported as a 404:\n${staged.notesOut}`);
+
+  const direct = runTag(`host-v${V}`, {
+    notes: [`host/${V}.md`], directPublish: 'true', pkgVersionHttp: '000',
+  });
+  assert.equal(direct.status, 0, direct.stderr);
+  assert.match(direct.notesOut, /could not confirm it \(HTTP `000`\)/,
+    `the same line on the direct-publish branch:\n${direct.notesOut}`);
+  assert.ok(!/does not serve it \(HTTP 404\)/.test(direct.notesOut),
+    `a probe that never answered must not be reported as a 404:\n${direct.notesOut}`);
+});
+
+test('a publish the registry serves only on a later probe is not called unconfirmed', () => {
+  // The probe runs immediately after the publish, and a packument can lag it by a second or two. One
+  // answer taken in that window would put "the registry does not serve it" on the body of a version
+  // that IS installable -- a false negative is still a false statement about what a reader can
+  // install, so the step retries briefly before concluding anything. The stub answers 404 on the
+  // first probe and 200 afterwards, which is exactly that window.
+  const r = runTag(`host-v${V}`, { notes: [`host/${V}.md`], directPublish: 'true', pkgVersionHttpAfter: 1 });
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(!/does not serve/.test(r.notesOut),
+    `a lagging registry is not a version that is missing:\n${r.notesOut}`);
+  assert.ok(!/awaiting maintainer approval/.test(r.notesOut), 'and a direct publish was not staged');
+});
+
+test('a failed rehearsal reports the registry answer, not a 000 it never asked for', () => {
+  // The fail-last messages read `version_live`, so a rehearsal that skipped the probe reports "the
+  // registry returned HTTP 000" -- a statement about the network that was never observed, in the
+  // message an operator reads to decide whether the release path works. The probe therefore runs on
+  // every path; only the propagation retry is skipped in a rehearsal, because nothing was submitted
+  // for the registry to catch up with.
+  const r = runTag(`fleet-v${V}`, {
+    notes: [`fleet/${V}.md`], event: 'workflow_dispatch', rehearsalProduct: 'fleet',
+    npmFails: true, pkgVersionHttp: '404',
+  });
+  assert.equal(r.status, 1, 'a rehearsal whose submission failed still goes red');
+  assert.ok(!/No such file or directory/.test(r.stderr),
+    `a rehearsal must not grep a log it never wrote:\n${r.stderr}`);
+  assert.match(r.stderr, /is not on the registry/,
+    `the message must carry the probe's answer:\n${r.stderr}`);
+  assert.ok(!/did not answer \(HTTP 000\)/.test(r.stderr),
+    `a probe that did run must not be reported as unanswered:\n${r.stderr}`);
+});
+
+test('a rehearsal does not read a submission log it never wrote', () => {
+  // The stage branch grepped ${RUNNER_TEMP}/npm-submit.log, which the rehearsal path never writes, so
+  // every workflow_dispatch logged `grep: .../npm-submit.log: No such file or directory`. Harmless
+  // only because the notes are discarded in a rehearsal -- but a missing-file error in a log people
+  // read to decide whether a release worked is noise that reads as a fault.
+  const r = runTag(`host-v${V}`, { notes: [`host/${V}.md`], event: 'workflow_dispatch' });
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(!/No such file or directory/.test(r.stderr),
+    `a rehearsal must not read a file it did not create:\n${r.stderr}`);
+  assert.ok(!/npm-submit\.log/.test(r.stderr),
+    `the missing submission log must not be named in the run log:\n${r.stderr}`);
+  // And a run that submitted nothing makes no claim about a channel. The notes are discarded here,
+  // but the sentence would be the same assertion-without-observation this block exists to remove.
+  assert.ok(!/awaiting maintainer approval/.test(r.notesOut),
+    `a rehearsal has no channel state to report:\n${r.notesOut}`);
+});
+
 test('NPM_DIRECT_PUBLISH publishes straight to the registry and adds no approval notice', () => {
   // An OIDC configuration with direct publishing enabled does not want a human in the loop, and a
   // "pending approval" notice on a version that IS live would be its own falsehood.
-  const r = runTag(`host-v${V}`, { notes: [`host/${V}.md`], directPublish: 'true' });
+  // pkgVersionHttp 200: a direct publish that worked leaves the version on the registry, which is
+  // what the body's npm section now reads. The harness default (404) models a version that is NOT
+  // there, so leaving it would spend the step's propagation retries and append an "unconfirmed"
+  // section to a body whose whole point here is that it stays clean.
+  const r = runTag(`host-v${V}`, { notes: [`host/${V}.md`], directPublish: 'true', pkgVersionHttp: '200' });
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /npm submission mode: publish$/m, `expected direct mode: ${r.stdout}`);
   assert.ok(!/npm stage publish/.test(r.stdout), 'must not stage in direct mode');
@@ -776,7 +914,10 @@ test('an npm without staging support falls back to direct publishing', () => {
   // Staging needs npm >= 11.15, verified against the published tarballs (absent from 11.14.0,
   // present in 11.15.0). The runner's npm comes from the node version, so the step probes for it;
   // assuming it would break the release on any runner whose node ships an older npm.
-  const r = runTag(`host-v${V}`, { notes: [`host/${V}.md`], npmHasStage: false });
+  // pkgVersionHttp 200 for the same reason as the direct-publish test above: the fallback verb IS
+  // `publish`, so a version the registry does not serve would take the propagation retries and add an
+  // "unconfirmed" section, neither of which this test is about.
+  const r = runTag(`host-v${V}`, { notes: [`host/${V}.md`], npmHasStage: false, pkgVersionHttp: '200' });
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /npm submission mode: publish$/m, `expected the fallback: ${r.stdout}`);
   assert.match(r.stdout, /\bnpm publish --access public/);
@@ -1576,4 +1717,64 @@ test('an unconfirmed version is not asserted absent', () => {
       `${code} must not be reported as a definitive absence:\n${r.notesOut}`);
     assert.match(r.notesOut, new RegExp(code), `${code} must be named so a reader can discount it`);
   }
+});
+
+test('#1029: the formula push uses the bypass identity, not the GITHUB_TOKEN', () => {
+  // `main` is protected (pull request + the `ci` check). The release job's last step commits
+  // Formula/mercury-ai.rb and pushes it, and on host-v0.2.3 that push was refused with GH013 AFTER
+  // npm had staged and the GitHub Release had been created -- so the release looked green while
+  // Homebrew stayed on 0.2.2. The fix is the same one plan-sync needed: check out with the operator
+  // PAT so the persisted git credential is the bypass identity, and push through that remote.
+  const wf = readFileSync(join(ROOT, '.github', 'workflows', 'release.yml'), 'utf8');
+  const checkout = wf.slice(wf.indexOf('- uses: actions/checkout@v4'), wf.indexOf('- uses: actions/setup-node@v4'));
+  // `|| github.token` because actions/checkout REFUSES an empty token input: with the secret unset
+  // the whole job died at step 1 and released nothing, which is worse than the formula bug (#1051).
+  assert.match(checkout, /token: \$\{\{ secrets\.OPERATOR_PAT \|\| github\.token \}\}/,
+    'the release job must check out with the bypass identity, and must not die when the secret is absent');
+  assert.match(checkout, /persist-credentials: true/,
+    'the PAT must persist, since the formula push relies on the credential checkout wrote');
+  // A URL built from the repository name would authenticate as the GITHUB_TOKEN regardless.
+  assert.doesNotMatch(wf, /git push "https:\/\/github\.com\/\$\{GITHUB_REPOSITORY\}\.git"/,
+    'the formula push must not build its own remote URL: that drops the PAT and is refused');
+  assert.match(wf, /git push origin HEAD:main/);
+  // The comment that made this look safe must not come back.
+  assert.doesNotMatch(wf, /main is not branch-protected/,
+    'release.yml must not claim main is unprotected: the ruleset refuses a token push');
+  // And a refused push must say so, rather than leaving a green-looking release with a stale formula.
+  assert.match(wf, /could not be pushed to main; Homebrew still installs the previous version/);
+});
+
+test('#1029: a refused formula push corrects the PUBLISHED body, not just the log', () => {
+  // The body is written before the push, and it tells readers the Homebrew formula is live. On a
+  // refused push that is false: brew installs the previous version. The audience that matters is
+  // the release page, so the step must edit the body before failing.
+  const r = runTag(`host-v${V}`, {
+    notes: [`host/${V}.md`], oidc: true, npmToken: '', formulaHttp: '200', gitPushFails: true,
+  });
+  assert.equal(r.status, 1, 'a refused push still fails the job');
+  assert.match(r.stdout, /gh release edit/, 'the step must edit the published release');
+  assert.match(r.notesArg, /## Homebrew was not updated for this release/,
+    `the body a reader sees must say so:\n${r.notesArg}`);
+  assert.match(r.notesArg, /still installs the PREVIOUS version/);
+  assert.match(r.notesArg, /`brew install aywengo\/mercury\/mercury-ai`/, 'and name the channel it is about');
+  // And the same run with a successful push must NOT carry the correction.
+  const ok = runTag(`host-v${V}`, { notes: [`host/${V}.md`], oidc: true, npmToken: '', formulaHttp: '200' });
+  assert.ok(!/Homebrew was not updated/.test(ok.notesArg), 'a successful push must not be annotated');
+});
+
+test('#1051: an unset OPERATOR_PAT does not kill the release, and the log names it', () => {
+  // Observed: `actions/checkout` fails with "Input required and not supplied: token" when the
+  // secret is missing, so the job stopped before parsing the tag. The checkout now falls back to
+  // github.token; the formula push is the last step and already fails loudly, correcting the body.
+  const wf = readFileSync(join(ROOT, '.github', 'workflows', 'release.yml'), 'utf8');
+  assert.match(wf, /OPERATOR_PAT \|\| github\.token/,
+    'the checkout must fall back rather than fail closed on a missing secret');
+  // The warning must read the variable in the SAME step: a step env is not inherited from another.
+  const publish = wf.slice(wf.indexOf('- name: Parse tag and publish'));
+  assert.match(publish, /OPERATOR_PAT: \$\{\{ secrets\.OPERATOR_PAT \}\}/,
+    'the publish step needs the secret in its own env for the warning to see it');
+  assert.match(publish, /::warning::OPERATOR_PAT is not set/,
+    'the log must name the missing capability instead of leaving a bare GH013 to interpret');
+  // And the warning is a WARNING, not a failure: the rest of the release still has to run.
+  assert.match(publish, /if \[ -z "\$\{OPERATOR_PAT:-\}" \]; then\n\s+echo "::warning::/);
 });

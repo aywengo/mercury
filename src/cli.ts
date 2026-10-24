@@ -15,6 +15,7 @@ import { existsSync, mkdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { applyHarnessGate, loadConfig } from './config.ts';
 import { openDatabase } from './db/database.ts';
+import { describeDrift, verifySchema } from './db/schemaVerify.ts';
 import { createRedactor } from './domain/redact.ts';
 import { createLogger } from './logger.ts';
 import { EventStore } from './events/eventStore.ts';
@@ -604,7 +605,30 @@ async function main(): Promise<void> {
   }
   if (cmd === 'migrate') {
     const db = openDatabase(config.dbPath);
-    logger.info({ db: config.dbPath }, 'migrations applied');
+    // "Applied" is a claim about the schema, not about a row count: schema_migrations can list a
+    // version whose objects a restored or hand-edited database does not have, and then every Run
+    // creation fails later with a missing column (#1032). Verify before saying the word.
+    const { missing, extra } = verifySchema(db);
+    if (extra.length > 0) {
+      logger.warn({ extra: describeDrift(extra) }, 'database has objects this build does not create');
+    }
+    if (missing.length > 0) {
+      logger.error(
+        { db: config.dbPath, missing: describeDrift(missing) },
+        'database schema is missing objects its migrations record as applied',
+      );
+      process.stderr.write(
+        `mercury migrate: ${config.dbPath} is inconsistent with its own migration history.\n`
+        + `  missing: ${describeDrift(missing)}\n`
+        + '  The migration versions are recorded, so nothing was re-applied. Repair by restoring the'
+        + ' last backup, or apply the missing objects by hand.\n'
+        + '  Back up before either: `sqlite3 <db> ".backup <db>.bak-$(date +%s)"`.\n',
+      );
+      process.exitCode = 1;
+      db.close();
+      return;
+    }
+    logger.info({ db: config.dbPath }, 'migrations applied and schema verified');
     db.close();
     return;
   }

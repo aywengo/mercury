@@ -289,3 +289,14 @@ test('the retry-of field renders an anchor, not escaped markup (issue #73 L7)', 
   assert.match(block, /esc\(shortId\(/, 'the link label must stay escaped once innerHTML can parse it');
   assert.match(block, /encodeURIComponent\(/, 'the run id in the href must stay percent-encoded');
 });
+
+test('#1024: run detail marks a Run that ended with unpushed commits', () => {
+  // The status badge alone said COMPLETED -- which was the whole defect (#1023/#1024). The marker
+  // must come from the event, so a reloaded page and a live one agree.
+  const html = readFileSync(join(UI_DIR, 'run.html'), 'utf8');
+  assert.match(html, /id="unpushed-badge"/, 'run.html must have a slot for the marker');
+  const src = readFileSync(join(UI_DIR, 'run.js'), 'utf8');
+  assert.match(src, /function renderUnpushedBadge\(/, 'run.js must render it');
+  assert.match(src, /e\.type === 'run\.unpushed_commits'/, 'the marker is driven by the event, not by a separate fetch');
+  assert.match(src, /unpushed \$\{commits\.length\}/, 'the badge names how many commits are stranded');
+});

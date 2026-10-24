@@ -892,6 +892,11 @@ export const EVENT_TYPES = new Set([
   // `selection`; payload is the validated record itself. A Run created without `selection`
   // emits nothing, exactly as before.
   'run.selection_recorded',
+  // A Run that committed and never pushed (issue #1024). Appended by the worker when the Run
+  // completes and at least one of its commits is reachable from no remote-tracking ref, payload
+  // { branch, commits }. Mercury never pushes on the agent's behalf: the record exists so the
+  // work is recoverable and the morning report names it, not so Mercury can finish the job.
+  'run.unpushed_commits',
   // A recorded automatic-retry decision that could not be honoured (A0-2, issue #987). Appended by
   // RunService.retry when a RECORDED intent is refused -- the per-Run maxRetries budget, a
   // COMPLETED parent, or the CP-3 credential-profile parity check (#807) -- in the SAME transaction

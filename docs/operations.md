@@ -394,6 +394,31 @@ the host, the identity, or the ruleset.
    `gh auth login` on the host user.
 4. **Bot token registered.** A `MERCURY_API_TOKENS` entry for `bot-nightly`
    exists, and `~/.config/mercury/bot-credentials.json` is mode 0600.
+3b. **Every credential profile's token is the identity it claims (#1060).** CP-4 hands the
+   profile's `GH_TOKEN` to the Run and the Run's tools use it, so a stale token silently makes every
+   Run act as whoever that token belongs to. The 2026-10-23 night filed four proposals as the
+   operator because `secrets/mercury-nightly.pat` still held the operator's PAT after the host's
+   `GH_TOKEN` was swapped for the bot's. After any token change, and as part of the host checklist:
+
+   ```bash
+   GH_TOKEN=$(cat ~/.config/mercury/secrets/mercury-nightly.pat) gh api user --jq .login
+   ```
+
+   It must answer the bot's login, never a person's. Separately, `mercury host doctor` reports
+   `agent credentials: WARN` when the worker's OS user has its own `gh` login or `github.com`
+   keychain entry; a dedicated OS user for the worker (the runbook is
+   [`deploy/dedicated-user.md`](../deploy/dedicated-user.md)) is the deployment that removes that.
+4a. **The rung-1 e2e gate is provisioned (#1010).** The nightly Run's
+   credential profile carries `MERCURY_API_URL` (the host API, e.g.
+   `{ "value": "http://127.0.0.1:3000" }`) and `MERCURY_API_TOKEN` (a
+   `{ "file": … }` reference to a 0600 token file). Those two are the only
+   `MERCURY_*` names a profile may inject; everything else is host config. Without them `select.ts`'s gate has nothing to read and
+   **passes by absence**, so rung 1 starts before tonight's E2E verdict exists
+   — and the selector's answer now says `"e2eGate": "absent"` when that happens.
+   Record the grant with the checklist: which token, which owner, and what it
+   can do. On this host it is the `bot-nightly` API token (owner `bot-nightly`):
+   it reads and creates Runs **as that owner** and can cancel them, because the
+   API has no read-only scope yet — the gate only needs `GET /api/runs`.
 5. **Config validates clean.** Install the example
    (`mkdir -p ${XDG_CONFIG_HOME:-~/.config}/mercury/bots &&
    cp deploy/nightly-bot.json.example .../bots/nightly.json`), then

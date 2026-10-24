@@ -1,8 +1,8 @@
 ---
 name: nightly
-version: 1.5.0
+version: 1.7.1
 description: Deterministic ladder selection for the unattended nightly loop — decides the next issue from GitHub metadata only (author, labels, timeline label actor), never issue text, then claims it with nightly:in-progress.
-capabilities: [nightly, ladder, selection, trust, claim, triage, github, issues]
+capabilities: [nightly, ladder, selection, trust, claim, triage, github, issues, model-preflight]
 ---
 
 # nightly — ladder selection
@@ -120,13 +120,58 @@ on its own file to separate flakes from defects, then:
 
 The report is exactly one JSON line `{ pass, fail, real, flakes }`.
 
+## Model preflight (`model.ts`, #1040)
+
+```bash
+node .agents/skills/nightly/model.ts check --task nightly-next [--bot nightly] [--bot-config <path>]
+```
+
+A crashed or reloading model server does not fail a Run when it is created: the Run starts, this
+skill is followed, `next.ts run` CLAIMS an issue, and only then does the first model call fail. On
+2026-10-23 oMLX was down and 17 Runs failed **after** claiming, so the morning held nothing but
+failures and stale claims.
+
+The preflight asks one question — "would a model call work right now?" — and answers with a record,
+not an exception:
+
+```json
+{"status":"ok","model":"Qwen3.8-27B-MLX-bf16-mtp","endpoint":"http://127.0.0.1:8000"}
+{"status":"unreachable","model":"…","endpoint":"…","reason":"fetch failed (ECONNREFUSED)"}
+{"status":"unauthorized","model":"…","endpoint":"…","reason":"/admin/api/models -> 401"}
+{"status":"model-missing","model":"…","endpoint":"…","reason":"12 model(s) listed, none named '…'"}
+```
+
+Exit codes: `0` ok, `1` not usable (refused, timeout, 401/403, 5xx, unparseable listing), `2` the
+model is not on the server, `64` usage. The model id is read from the bot task that runs it
+(`--task nightly-next` → that task's `template.model`), so the pin keeps one home. `--model <id>`
+overrides it; `--base-url`/`--api-key` default to the local oMLX (`OMLX_BASE_URL`, `OMLX_API_KEY`,
+else `~/.prime/agent/models.json`).
+
+**`next.ts run` runs this itself, by default**, BEFORE the ladder and therefore before the claim: on
+any non-ok record it prints the record as its JSON line, exits 1, and claims nothing. The default
+task is `nightly-next`, so a bare `next.ts run --repo aywengo/mercury` is protected; `--dry-run`
+skips the check (it writes nothing) and `--skip-model-check` is the explicit escape hatch. The check
+runs before the GitHub transport is built, so a down model is reported as such and not as a missing
+token. `--model <id>`, `--base-url`, `--api-key`, `--bot <alias>` and `--bot-config <path>` override
+what the pin and the host provide.
+
+**When the preflight fails, do not work around it.** Do not claim, do not retry the endpoint, do
+not fall back to another model. Report the record and end the Run; the night produces one clear
+"model unavailable" line, and the next night starts clean.
+
 ## Next (`next.ts`, N1-3)
 
 ```bash
-node .agents/skills/nightly/next.ts run --repo aywengo/mercury [--dry-run]
+node .agents/skills/nightly/next.ts run --repo aywengo/mercury [--dry-run] [--skip-model-check]
 node .agents/skills/nightly/next.ts finish --repo aywengo/mercury --issue <n>
 node .agents/skills/nightly/next.ts blocked --repo aywengo/mercury --issue <n> --reason "<question>"
 ```
+
+`run` checks the model endpoint first (see above) unless `--dry-run` or `--skip-model-check` is
+given. The pin is read from the task that runs it — `<botsDir>/nightly.json` → `nightly-next` →
+`template.model`, where `<botsDir>` is `$XDG_CONFIG_HOME/mercury/bots` or `~/.config/mercury/bots`,
+the same directory the scheduler reads. A task with no pin is an error naming the file, not a silent
+skip.
 
 `run` executes the N1-1 ladder (rung 0 resume, rung 1 trusted bugs, rung 2 trusted enhancements,
 rung 3 new @aywengo issues, rung 4 docs → proposals) and claims the chosen issue `nightly:in-progress` (already done by the selector before
@@ -137,7 +182,12 @@ instruction:
 node .agents/skills/nightly/next.ts propose --repo aywengo/mercury --source <doc#anchor> --title "<title>" --body-file <path>
 ```
 
-Rung 4 files ONLY through `propose` (#881). The body file is the drafted prose; `propose`
+Rung 4 files ONLY through `propose` (#881, #1060). **Never** file with `gh issue create` or
+`gh api …/issues`: those bypass the dedupe, write the marker by hand (wrongly), and — because a
+tool shell's `gh` can carry the HOST user's login instead of the Run's profile token — can file as
+the operator (#1060). If `propose` refuses, the answer is "file nothing", not "file another way".
+
+The body file is the drafted prose; `propose`
 appends the required `## Source` section with the machine-readable marker
 `<!-- nightly-source:<key> -->`, then dedupes BEFORE creating anything: open AND closed issues
 are searched for the source key or an exact title match, a match files nothing and prints the
@@ -201,6 +251,13 @@ Nightly-specific rules on top of `issue-fix-loop`:
   Run carries `notAfter`. Do not write code that defends against concurrent nightly Runs or
   against the deadline — that is the scheduler's job.
 
+**Never stops on a progress message.** A nightly Run is not done until it has PUSHED the branch,
+commented on the PR, and called `finish` (or `blocked`). A "here is where I got to" message is
+never an exit path: `run_84a35e1f57ae4df4` (2026-10-22) committed, reported progress and ended,
+and the night's work sat in a worktree on no remote branch (#1023, #1024). `next.ts` records the
+claim and the terminal call in the Run ledger, and the morning report lists every Run that
+claimed work and never called either — so stopping early is now visible, not free.
+
 **Never asks (§4.4):** a nightly Run must end without NEEDS_INPUT. When in doubt — ambiguous
 acceptance criteria, a needed credential or design decision, an unmerged dependency, a limit
 from the table above — run `blocked --reason "<the question>"`: it labels the issue
@@ -247,6 +304,36 @@ issues. Sections:
   the last 14 nights are listed; the rest are counted once as `older entries: K` (#964). The state
   file keeps every entry. Test names are shown repo-relative (`e2e/x.test.ts`), never as a worktree
   path, including entries recorded before that normalization existed.
+- **Runs that ended with unpushed commits** (#1024) — Runs whose `run.unpushed_commits` event
+  names commits reachable from no remote branch. The record is written when a Run COMPLETES;
+  a Run stopped by `notAfter` (`TIMED_OUT`) or failed mid-work keeps its commits in the same
+  worktree but emits nothing, so read that row's worktree before GC when a night ends badly. Each line carries the Run id, the branch it was
+  meant for, the commits and the worktree path, so the work can be recovered by hand. Mercury
+  never pushes on an agent's behalf; this section is the recovery pointer.
+- **nightly-next Runs that never called finish/blocked** (#1024) — Runs that claimed an issue
+  (`next.ts run`) and never reached a terminal call, read from the Run ledger
+  (`${XDG_STATE_HOME:-~/.local/state}/mercury/nightly/run-ledger.json`, written by `next.ts`).
+  Each line carries the Run id, the issue and the worktree path. A progress message is not an
+  exit path.
+
+Both sections are empty on a clean night, and their headings still render, so "nothing to
+report" is visibly different from "the check did not run".
+
+The digest also opens with a **version line** (#1023, #1024): the host's Mercury version
+(`/healthz`) and the `issue-fix-loop` version the night's Runs loaded, read from their
+`skill.completed` events. When the loaded version is older than the one in `.agents/skills/` on
+`main` (contents API), the line becomes a **stale-skills warning** instead of a plain record. It is
+always rendered when a loaded version is known — "which host, which procedure?" is the question
+nobody could answer during the week the 1.2.0 gap stayed invisible — and an unknown version is
+never reported as staleness.
+
+Both new sections are scoped to the digest's repository: the runs API is host-wide, so a Run whose
+`repository.url` names another repository is skipped before its events are read. Only an
+identifiable URL excludes a Run — a local checkout path does not establish identity (it can be
+renamed), so such a Run is kept rather than hidden. The scan reads each Run's event TAIL via `lastSequence`,
+because `skill.completed` and `run.unpushed_commits` are the last events of a Run — paging forward
+from sequence 1 would miss them on any Run longer than 1000 events — and it stops at a 60 s
+wall-clock budget so it can never crowd out filing the digest.
 
 The report is read-only except for the digest issue itself and the close
 of every OPEN digest titled `nightly report — D` with D strictly before the
