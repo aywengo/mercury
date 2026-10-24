@@ -93,6 +93,14 @@ test('fixture set: each malformed config is refused with a named field', () => {
     { label: 'negative maxCatchUp', cfg: { schedule: { tasks: [
       { name: 'a', cron: '* * * * *', template: { task: 'x' }, maxCatchUp: -1 },
     ] } }, field: /schedule\.tasks\[0\]\.maxCatchUp/, message: /non-negative integer/ },
+    // Found by the B4 §14 review (#915): three §12 fields had no negative fixture.
+    { label: 'description must be a string', cfg: { ...OK_CFG, description: 42 }, field: /description/, message: /must be a string/ },
+    { label: 'template must be a JSON object', cfg: { schedule: { tasks: [
+      { name: 'a', cron: '* * * * *', template: 'do it' },
+    ] } }, field: /schedule\.tasks\[0\]\.template/, message: /JSON object/ },
+    { label: 'singleFlight must be a boolean', cfg: { schedule: { tasks: [
+      { name: 'a', cron: '* * * * *', template: { task: 'x' }, singleFlight: 'yes' },
+    ] } }, field: /schedule\.tasks\[0\]\.singleFlight/, message: /boolean/ },
     { label: 'bad api url', cfg: { ...OK_CFG, api: { url: 'ftp://x' } }, field: /api\.url/, message: /http/ },
     { label: 'fake http scheme', cfg: { ...OK_CFG, api: { url: 'httpx://x' } }, field: /api\.url/, message: /http/ },
     { label: 'bad timeout', cfg: { ...OK_CFG, api: { url: 'http://x', timeoutMs: 0 } }, field: /api\.timeoutMs/, message: /positive integer/ },
