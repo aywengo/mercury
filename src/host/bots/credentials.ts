@@ -13,6 +13,7 @@
 import { statSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { botOwnerId } from './keys.ts';
 
 export function botCredentialsPath(env: NodeJS.ProcessEnv = process.env): string {
   const xdg = env.XDG_CONFIG_HOME;
@@ -44,10 +45,11 @@ export interface BotTokenPair {
 }
 
 /**
- * Read the credentials file and return this alias's entry. Throws on missing file, bad JSON,
- * bad shape, or unsafe permissions. The token VALUE never appears in an error message.
+ * Read the credentials file and return this alias's entry, or undefined when the file is valid but
+ * has no entry for the alias. Throws on missing file, bad JSON, bad shape, or unsafe permissions.
+ * The token VALUE never appears in an error message.
  */
-export function readBotCredentials(alias: string, env: NodeJS.ProcessEnv = process.env): BotTokenPair {
+export function readBotCredentialsEntry(alias: string, env: NodeJS.ProcessEnv = process.env): BotTokenPair | undefined {
   const path = botCredentialsPath(env);
   assertBotCredentialsSafe(path);
   let raw: unknown;
@@ -65,7 +67,7 @@ export function readBotCredentials(alias: string, env: NodeJS.ProcessEnv = proce
   }
   const entry = (raw as Record<string, unknown>)[alias];
   if (entry === undefined) {
-    throw new Error(`${path}: no entry for alias '${alias}'`);
+    return undefined;
   }
   if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
     throw new Error(`${path}: entry '${alias}' must be an object with an 'api' token field`);
@@ -92,22 +94,39 @@ export function readBotCredentials(alias: string, env: NodeJS.ProcessEnv = proce
 }
 
 /**
- * Parse the server-side token registry (MERCURY_API_TOKENS) far enough to find this bot's entry.
- * The parse rules are the strict ones B0-1 shipped (src/config.ts parseTokens): entries are
- * `<token>:<owner-id>` with exactly one colon.
- *
- * Returns the owner id whose token matches, or null when no registered token equals the bot's.
+ * Read the credentials file and return this alias's entry. Throws on missing file, bad JSON,
+ * bad shape, or unsafe permissions. The token VALUE never appears in an error message.
  */
-export function registeredOwnerForToken(token: string, apiTokensRaw: string | undefined): string | null {
-  if (apiTokensRaw === undefined || apiTokensRaw.trim() === '') return null;
+export function readBotCredentials(alias: string, env: NodeJS.ProcessEnv = process.env): BotTokenPair {
+  const entry = readBotCredentialsEntry(alias, env);
+  if (entry === undefined) {
+    throw new Error(`${botCredentialsPath(env)}: no entry for alias '${alias}'`);
+  }
+  return entry;
+}
+
+/** One parsed MERCURY_API_TOKENS entry. */
+export interface ApiTokenEntry {
+  token: string;
+  owner: string;
+}
+
+/**
+ * Parse the server-side token registry (MERCURY_API_TOKENS) with the strict rules B0-1 shipped
+ * (src/config.ts parseTokens): entries are `<token>:<owner-id>` with exactly one colon. Both halves
+ * are trimmed, as the server trims them.
+ *
+ * A malformed entry THROWS, with the same safe, index-based message the server uses: validate runs
+ * before loadConfig(), and skipping a malformed entry would report 'not registered' for an env that
+ * actually stops the host at boot. The token value is never echoed.
+ */
+export function parseApiTokenEntries(apiTokensRaw: string | undefined): ApiTokenEntry[] {
+  if (apiTokensRaw === undefined || apiTokensRaw.trim() === '') return [];
+  const out: ApiTokenEntry[] = [];
   const entries = apiTokensRaw.split(',');
   for (let i = 0; i < entries.length; i++) {
     const trimmed = entries[i]!.trim();
     if (trimmed === '') continue;
-    // Same strict shape loadConfig enforces (B0-1) — INCLUDING the failure: validate runs before
-    // loadConfig(), and skipping a malformed entry would report 'not registered' for an env that
-    // actually stops the host at boot. Fail with the same safe, index-based error (no token
-    // value echoed) so the operator fixes the real problem.
     const parts = trimmed.split(':');
     if (parts.length !== 2 || !parts[0]!.trim() || !parts[1]!.trim()) {
       const colons = (trimmed.match(/:/g) ?? []).length;
@@ -120,7 +139,33 @@ export function registeredOwnerForToken(token: string, apiTokensRaw: string | un
         `MERCURY_API_TOKENS entry ${i} must be exactly 'token:owner'; got an entry with ${shape}`,
       );
     }
-    if (parts[0]!.trim() === token) return parts[1]!.trim();
+    out.push({ token: parts[0]!.trim(), owner: parts[1]!.trim() });
   }
-  return null;
+  return out;
+}
+
+/** The owner id whose token matches, or null when no registered token equals the bot's. */
+export function registeredOwnerForToken(token: string, apiTokensRaw: string | undefined): string | null {
+  return parseApiTokenEntries(apiTokensRaw).find((e) => e.token === token)?.owner ?? null;
+}
+
+/** The token registered for one owner id, or null. */
+export function apiTokenForOwner(apiTokensRaw: string | undefined, owner: string): string | null {
+  return parseApiTokenEntries(apiTokensRaw).find((e) => e.owner === owner)?.token ?? null;
+}
+
+/**
+ * Install one bot's `token:bot-<alias>` entry into a MERCURY_API_TOKENS value, preserving every
+ * other entry (#677's preservation rule) and replacing any previous entry for the same owner (a
+ * duplicate would register two tokens for one scope). The result is comma-separated with no spaces,
+ * which is what mercury.env's safe charset allows. Throws on a malformed existing entry rather than
+ * writing a registry the server rejects.
+ */
+export function upsertBotTokenInApiTokens(apiTokensRaw: string | undefined, alias: string, token: string): string {
+  const owner = botOwnerId(alias);
+  const entries = parseApiTokenEntries(apiTokensRaw).filter((e) => e.owner !== owner);
+  entries.push({ token, owner });
+  // Comma only, no space: mercury.env's safe charset has no space (the three parsers that read
+  // the file must agree), and a wizard re-run validates this value before preserving it.
+  return entries.map((e) => `${e.token}:${e.owner}`).join(',');
 }
