@@ -85,7 +85,7 @@ Record: [`docs/dispatcher-bot-design.md`](docs/dispatcher-bot-design.md)
 | #908 | dispatcher B2-2: trigger storm guards — includeBotRuns, chain depth, both cooldowns, AP… | open | — |
 | #909 | dispatcher B2-3: the observer scope — a third posture in AuthContext, read-only across… | open | — |
 | #912 | dispatcher B3: the LLM brain — LLMConnection, closed action vocabulary, budgets, script… | open | — |
-| #915 | dispatcher B4: setup integration and hardening — host setup bots step, host doctor bots… | open | — |
+| #915 | dispatcher B4: setup integration and hardening — host setup bots step, host doctor bots… | done | #1070 |
 
 ## Crew — Milestone A follow-ups
 
