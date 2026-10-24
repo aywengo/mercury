@@ -218,12 +218,23 @@ no credential helper answers, and no environment variable turns that off. Keep n
 for a source-control host on a Mercury host, or treat such an entry as available to every Run.
 SSH credentials for a profile are CP-5's scope; in CP-4 profiles carry HTTPS credentials only.
 
-**Not covered: credentials an agent harness brings itself (#1060).** The layers above govern the
-environment Mercury builds and the process it spawns. They do not reach inside an agent harness: a
-harness that runs its tools in a kernel of its own — a daemon process started outside the Run —
-gives those tools the *daemon's* environment, not the Run's. A `gh` there reads
+**A profile's token must be the identity it claims.** CP-4 injects the profile's `GH_TOKEN` into
+the Run, and the Run's tools use it: measured on 2026-10-24, a `python_repl` shell inside a Run saw
+the Run's `GH_CONFIG_DIR` and `GH_TOKEN`, and `gh api user` answered with that token's account.
+Nothing checks that the account is the intended one. On 2026-10-23 four nightly proposals were filed
+as the operator because `secrets/mercury-nightly.pat` still held the operator's PAT from before the
+host's `GH_TOKEN` was swapped for the bot's (#1060). After any token change, confirm each profile's
+identity:
+
+```bash
+GH_TOKEN=$(cat ~/.config/mercury/secrets/<file>) gh api user --jq .login
+```
+
+**Not covered: credentials an agent harness brings itself.** The layers above govern the
+environment Mercury builds and the process it spawns. They do not reach inside an agent harness
+that starts processes with an environment of its own. A `gh` there reads
 `$HOME/.config/gh/hosts.yml`, and a `git` there reads the login keychain, so the Run acts as the
-worker's OS user. Measured on 2026-10-23: four nightly proposals were filed as the operator.
+worker's OS user.
 
 The boundary is therefore: **CP-4 protects what Mercury starts; it cannot protect what the harness
 starts.** Two consequences:
