@@ -230,9 +230,9 @@ starts.** Two consequences:
 
 - `mercury host doctor` reports `agent credentials: WARN` when the worker's user has a `gh` login
   or a `github.com` keychain entry, because that is exactly what a leak escalates to.
-- The recommended deployment is a **dedicated OS user for the worker** (design §12): with no
-  `gh` login, no keychain entry and no agent state of its own, a leaking tool shell fails instead
-  of acting as a person.
+- The recommended deployment is a **dedicated OS user for the worker** (design §12, runbook:
+  [`deploy/dedicated-user.md`](../deploy/dedicated-user.md)): with no `gh` login, no keychain entry
+  and no agent state of its own, a leaking tool shell fails instead of acting as a person.
 
 ## PrimeAgent
 
