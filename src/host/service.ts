@@ -1,15 +1,20 @@
 /**
  * `mercury host service` — the M4 service generation (docs/host-installer.md M4).
  *
- * Generates and enables the user-scoped service that runs the host:
+ * Generates and enables the user-scoped services that run the host. There are two,
+ * because `mercury server` never claims Runs (the boundary in AGENTS.md: the web server
+ * does not execute agents outside `dev`):
  *
- *   - macOS: launchd agent at `~/Library/LaunchAgents/com.mercury.host.plist`, which
- *     runs a wrapper script that sources `mercury.env` (launchd has no EnvironmentFile)
- *     and execs `mercury server` with the embedded worker.
- *   - Linux: systemd user unit at `~/.config/systemd/user/mercury.service` with an
+ *   - macOS: launchd agents at `~/Library/LaunchAgents/com.mercury.host.plist` and
+ *     `com.mercury.worker.plist`, which run wrapper scripts that source `mercury.env`
+ *     (launchd has no EnvironmentFile) and exec `mercury server` and `mercury worker`.
+ *   - Linux: systemd user units `mercury.service` and `mercury-worker.service` with an
  *     ABSOLUTE `EnvironmentFile=` path (safer than `%h/...` given `XDG_CONFIG_HOME`
  *     handling — the docstring and systemdUnit() must agree, issue #650), enabled
  *     with `systemctl --user enable --now` (plus a `loginctl enable-linger` hint).
+ *
+ * The worker unit is not optional: a host whose only unit runs `server` accepts Runs
+ * forever and executes none (issue #1071, found by the #929 fresh-host run).
  *
  * Both load `mercury.env` the same way the production units in `deploy/` do
  * (EnvironmentFile), and both run the installed `mercury` binary, never a bare name
@@ -35,6 +40,12 @@ export const SERVICE_NAME = 'mercury';
 
 /** The launchd label (macOS). */
 export const LAUNCHD_LABEL = 'com.mercury.host';
+
+/** The worker unit id (systemd). A second unit, because `server` never claims Runs. */
+export const WORKER_SERVICE_NAME = 'mercury-worker';
+
+/** The worker launchd label (macOS). */
+export const LAUNCHD_WORKER_LABEL = 'com.mercury.worker';
 
 /**
  * Resolve the installed mercury binary: `which mercury`, else the npm global bin.
@@ -69,15 +80,32 @@ export function systemdUnitPath(env: NodeJS.ProcessEnv = process.env): string {
   return join(base, 'systemd', 'user', `${SERVICE_NAME}.service`);
 }
 
+/** The worker systemd user unit path (Linux). */
+export function systemdWorkerUnitPath(env: NodeJS.ProcessEnv = process.env): string {
+  const base = env.XDG_CONFIG_HOME?.trim() || join(homedir(), '.config');
+  return join(base, 'systemd', 'user', `${WORKER_SERVICE_NAME}.service`);
+}
+
 /** The launchd plist path (macOS). */
 export function launchdPlistPath(env: NodeJS.ProcessEnv = process.env): string {
   return join(homedir(), 'Library', 'LaunchAgents', `${LAUNCHD_LABEL}.plist`);
+}
+
+/** The worker launchd plist path (macOS). */
+export function launchdWorkerPlistPath(env: NodeJS.ProcessEnv = process.env): string {
+  return join(homedir(), 'Library', 'LaunchAgents', `${LAUNCHD_WORKER_LABEL}.plist`);
 }
 
 /** The launchd wrapper script path (macOS): sources mercury.env, execs mercury server. */
 export function launchdWrapperPath(env: NodeJS.ProcessEnv = process.env): string {
   const base = env.XDG_STATE_HOME?.trim() || join(homedir(), '.local', 'state');
   return join(base, 'mercury', 'run-host.sh');
+}
+
+/** The worker's launchd wrapper script path (macOS): sources mercury.env, execs mercury worker. */
+export function launchdWorkerWrapperPath(env: NodeJS.ProcessEnv = process.env): string {
+  const base = env.XDG_STATE_HOME?.trim() || join(homedir(), '.local', 'state');
+  return join(base, 'mercury', 'run-worker.sh');
 }
 
 /** The systemd user unit text. Deterministic for the same inputs. */
@@ -91,11 +119,36 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=%h
 EnvironmentFile=${envFile}
-Environment=MERCURY_EMBEDDED_WORKER=true
 ExecStart=${mercuryBin} server
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=15
+
+[Install]
+WantedBy=default.target
+`;
+}
+
+/**
+ * The worker unit text. Separate from the host unit because `mercury server` does not
+ * claim Runs: `MERCURY_EMBEDDED_WORKER` is honoured only for `dev` (issue #1071).
+ * `TimeoutStopSec` matches deploy/mercury-worker.service: SIGTERM stops claiming,
+ * signals the in-flight agent and requeues, and needs room for that (issue #51).
+ */
+export function systemdWorkerUnit(mercuryBin: string, envFile: string): string {
+  return `[Unit]
+Description=Mercury worker (claims and executes Runs)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h
+EnvironmentFile=${envFile}
+ExecStart=${mercuryBin} worker
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=45
 
 [Install]
 WantedBy=default.target
@@ -111,20 +164,39 @@ export function launchdWrapper(mercuryBin: string, envFile: string): string {
 set -a
 source "${envFile}"
 set +a
-export MERCURY_EMBEDDED_WORKER=true
 exec "${mercuryBin}" server
+`;
+}
+
+/** The worker's launchd wrapper script text. */
+export function launchdWorkerWrapper(mercuryBin: string, envFile: string): string {
+  return `#!/bin/bash
+# Generated by \`mercury host service install\` (docs/host-installer.md M4).
+# The worker is a separate process: \`mercury server\` never claims Runs (#1071).
+set -a
+source "${envFile}"
+set +a
+exec "${mercuryBin}" worker
 `;
 }
 
 /** The launchd plist text. Deterministic for the same inputs. */
 export function launchdPlist(wrapper: string, stateDir: string): string {
-  const log = join(stateDir, 'mercury', 'host.log');
+  return launchdPlistText(LAUNCHD_LABEL, wrapper, join(stateDir, 'mercury', 'host.log'));
+}
+
+/** The worker's plist text: same shape, its own label and log file. */
+export function launchdWorkerPlist(wrapper: string, stateDir: string): string {
+  return launchdPlistText(LAUNCHD_WORKER_LABEL, wrapper, join(stateDir, 'mercury', 'worker.log'));
+}
+
+function launchdPlistText(label: string, wrapper: string, log: string): string {
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>${LAUNCHD_LABEL}</string>
+  <string>${label}</string>
   <key>ProgramArguments</key>
   <array>
     <string>/bin/bash</string>
@@ -174,12 +246,17 @@ export function installService(
   if (platform === 'darwin') {
     const wrapper = launchdWrapperPath(env);
     const plist = launchdPlistPath(env);
+    const workerWrapper = launchdWorkerWrapperPath(env);
+    const workerPlist = launchdWorkerPlistPath(env);
     const stateDir = env.XDG_STATE_HOME?.trim() || join(homedir(), '.local', 'state');
     if (dryRun) {
       io.out('mercury host service install --dry-run (macOS)\n');
-      io.out(`  wrapper: ${wrapper}\n`);
-      io.out(`  plist:   ${plist}\n`);
+      io.out(`  host wrapper:   ${wrapper}\n`);
+      io.out(`  host plist:     ${plist}\n`);
+      io.out(`  worker wrapper: ${workerWrapper}\n`);
+      io.out(`  worker plist:   ${workerPlist}\n`);
       io.out(launchdPlist(wrapper, stateDir) + '\n');
+      io.out(launchdWorkerPlist(workerWrapper, stateDir) + '\n');
       return 0;
     }
     if (!existsSync(envFile)) {
@@ -189,8 +266,11 @@ export function installService(
     mkdirSync(join(stateDir, 'mercury'), { recursive: true });
     writeFileSync(wrapper, launchdWrapper(bin, envFile), { mode: 0o700 });
     chmodSync(wrapper, 0o700);
+    writeFileSync(workerWrapper, launchdWorkerWrapper(bin, envFile), { mode: 0o700 });
+    chmodSync(workerWrapper, 0o700);
     mkdirSync(join(homedir(), 'Library', 'LaunchAgents'), { recursive: true });
     writeFileSync(plist, launchdPlist(wrapper, stateDir), { mode: 0o644 });
+    writeFileSync(workerPlist, launchdWorkerPlist(workerWrapper, stateDir), { mode: 0o644 });
     try {
       // Idempotent load (issue #650): `launchctl load` returns non-zero when the agent
       // is already loaded, which made a plain re-run exit 1. The modern API
@@ -198,34 +278,42 @@ export function installService(
       // state first: bootout only when print shows the label, then bootstrap fresh.
       const uid = typeof process.getuid === 'function' ? process.getuid() : null;
       if (uid === null) throw new Error('cannot determine uid for launchctl gui domain');
-      const target = `gui/${uid}/${LAUNCHD_LABEL}`;
-      let loaded = true;
-      try {
-        execFileSync('launchctl', ['print', target], { timeout: 10000, stdio: 'ignore' });
-      } catch {
-        loaded = false;
-      }
-      if (loaded) {
+      for (const [label, agentPlist] of [
+        [LAUNCHD_LABEL, plist],
+        [LAUNCHD_WORKER_LABEL, workerPlist],
+      ] as const) {
+        const target = `gui/${uid}/${label}`;
+        let loaded = true;
         try {
-          execFileSync('launchctl', ['bootout', target], { timeout: 10000, stdio: 'ignore' });
+          execFileSync('launchctl', ['print', target], { timeout: 10000, stdio: 'ignore' });
         } catch {
-          // bootout raced with an unload; bootstrap below decides success
+          loaded = false;
         }
+        if (loaded) {
+          try {
+            execFileSync('launchctl', ['bootout', target], { timeout: 10000, stdio: 'ignore' });
+          } catch {
+            // bootout raced with an unload; bootstrap below decides success
+          }
+        }
+        execFileSync('launchctl', ['bootstrap', `gui/${uid}`, agentPlist], { timeout: 10000 });
       }
-      execFileSync('launchctl', ['bootstrap', `gui/${uid}`, plist], { timeout: 10000 });
-      io.out(`Installed and loaded ${LAUNCHD_LABEL} (${plist}).\n`);
+      io.out(`Installed and loaded ${LAUNCHD_LABEL} (${plist}) and ${LAUNCHD_WORKER_LABEL} (${workerPlist}).\n`);
     } catch (e) {
       io.err(`host service: launchctl bootstrap failed: ${(e as Error).message}\n`);
       return 1;
     }
     return 0;
   }
-  // Linux (systemd user unit)
+  // Linux (systemd user units: host and worker)
   const unitPath = systemdUnitPath(env);
+  const workerUnitPath = systemdWorkerUnitPath(env);
   if (dryRun) {
     io.out('mercury host service install --dry-run (systemd user)\n');
-    io.out(`  unit: ${unitPath}\n`);
+    io.out(`  unit:        ${unitPath}\n`);
+    io.out(`  worker unit: ${workerUnitPath}\n`);
     io.out(systemdUnit(bin, envFile) + '\n');
+    io.out(systemdWorkerUnit(bin, envFile) + '\n');
     return 0;
   }
   if (!existsSync(envFile)) {
@@ -234,10 +322,13 @@ export function installService(
   }
   mkdirSync(join(unitPath, '..'), { recursive: true });
   writeFileSync(unitPath, systemdUnit(bin, envFile), { mode: 0o644 });
+  writeFileSync(workerUnitPath, systemdWorkerUnit(bin, envFile), { mode: 0o644 });
   try {
     execFileSync('systemctl', ['--user', 'daemon-reload'], { timeout: 10000 });
-    execFileSync('systemctl', ['--user', 'enable', '--now', `${SERVICE_NAME}.service`], { timeout: 10000 });
-    io.out(`Installed and enabled ${SERVICE_NAME}.service (${unitPath}).\n`);
+    for (const unit of [`${SERVICE_NAME}.service`, `${WORKER_SERVICE_NAME}.service`]) {
+      execFileSync('systemctl', ['--user', 'enable', '--now', unit], { timeout: 10000 });
+    }
+    io.out(`Installed and enabled ${SERVICE_NAME}.service and ${WORKER_SERVICE_NAME}.service (${unitPath}).\n`);
     io.out('Hint: run `loginctl enable-linger $USER` so the unit survives logout.\n');
   } catch (e) {
     io.err(`host service: systemctl failed: ${(e as Error).message}\n`);
@@ -253,26 +344,34 @@ export function serviceStatus(
   env: NodeJS.ProcessEnv = process.env,
 ): number {
   if (platform === 'darwin') {
-    const plist = launchdPlistPath(env);
-    io.out(`launchd agent: ${plist} ${existsSync(plist) ? '(present)' : '(absent)'}\n`);
-    if (existsSync(plist)) {
-      try {
-        const out = execFileSync('launchctl', ['list', LAUNCHD_LABEL], { encoding: 'utf8', timeout: 5000 });
-        io.out(`  loaded: ${out.trim() ? 'yes' : 'no'}\n`);
-      } catch {
-        io.out('  loaded: no\n');
+    for (const [label, plist] of [
+      [LAUNCHD_LABEL, launchdPlistPath(env)],
+      [LAUNCHD_WORKER_LABEL, launchdWorkerPlistPath(env)],
+    ] as const) {
+      io.out(`launchd agent: ${label} ${plist} ${existsSync(plist) ? '(present)' : '(absent)'}\n`);
+      if (existsSync(plist)) {
+        try {
+          const out = execFileSync('launchctl', ['list', label], { encoding: 'utf8', timeout: 5000 });
+          io.out(`  loaded: ${out.trim() ? 'yes' : 'no'}\n`);
+        } catch {
+          io.out('  loaded: no\n');
+        }
       }
     }
     return 0;
   }
-  const unitPath = systemdUnitPath(env);
-  io.out(`systemd user unit: ${unitPath} ${existsSync(unitPath) ? '(present)' : '(absent)'}\n`);
-  if (existsSync(unitPath)) {
-    try {
-      const out = execFileSync('systemctl', ['--user', 'is-active', `${SERVICE_NAME}.service`], { encoding: 'utf8', timeout: 5000 });
-      io.out(`  active: ${out.trim()}\n`);
-    } catch {
-      io.out('  active: inactive\n');
+  for (const [name, unitPath] of [
+    [SERVICE_NAME, systemdUnitPath(env)],
+    [WORKER_SERVICE_NAME, systemdWorkerUnitPath(env)],
+  ] as const) {
+    io.out(`systemd user unit: ${unitPath} ${existsSync(unitPath) ? '(present)' : '(absent)'}\n`);
+    if (existsSync(unitPath)) {
+      try {
+        const out = execFileSync('systemctl', ['--user', 'is-active', `${name}.service`], { encoding: 'utf8', timeout: 5000 });
+        io.out(`  active: ${out.trim()}\n`);
+      } catch {
+        io.out('  active: inactive\n');
+      }
     }
   }
   return 0;
@@ -285,34 +384,43 @@ export function uninstallService(
   env: NodeJS.ProcessEnv = process.env,
 ): number {
   if (platform === 'darwin') {
-    const plist = launchdPlistPath(env);
-    const wrapper = launchdWrapperPath(env);
-    if (existsSync(plist)) {
-      try {
-        execFileSync('launchctl', ['unload', plist], { timeout: 10000 });
-      } catch {
-        // not loaded is fine
+    const agents = [
+      [LAUNCHD_LABEL, launchdPlistPath(env), launchdWrapperPath(env)],
+      [LAUNCHD_WORKER_LABEL, launchdWorkerPlistPath(env), launchdWorkerWrapperPath(env)],
+    ] as const;
+    for (const [label, plist, wrapper] of agents) {
+      if (existsSync(plist)) {
+        try {
+          execFileSync('launchctl', ['unload', plist], { timeout: 10000 });
+        } catch {
+          // not loaded is fine
+        }
+        try {
+          unlinkSync(plist);
+        } catch {
+          // ignore
+        }
       }
-      try {
-        unlinkSync(plist);
-      } catch {
-        // ignore
+      if (existsSync(wrapper)) {
+        try {
+          unlinkSync(wrapper);
+        } catch {
+          // ignore
+        }
       }
+      io.out(`Removed ${label}.\n`);
     }
-    if (existsSync(wrapper)) {
-      try {
-        unlinkSync(wrapper);
-      } catch {
-        // ignore
-      }
-    }
-    io.out(`Removed ${LAUNCHD_LABEL}.\n`);
     return 0;
   }
-  const unitPath = systemdUnitPath(env);
-  if (existsSync(unitPath)) {
+  let removed = false;
+  for (const [name, unitPath] of [
+    [SERVICE_NAME, systemdUnitPath(env)],
+    [WORKER_SERVICE_NAME, systemdWorkerUnitPath(env)],
+  ] as const) {
+    if (!existsSync(unitPath)) continue;
+    removed = true;
     try {
-      execFileSync('systemctl', ['--user', 'disable', '--now', `${SERVICE_NAME}.service`], { timeout: 10000 });
+      execFileSync('systemctl', ['--user', 'disable', '--now', `${name}.service`], { timeout: 10000 });
     } catch {
       // not enabled is fine
     }
@@ -321,9 +429,8 @@ export function uninstallService(
     } catch {
       // ignore
     }
-    io.out(`Removed ${SERVICE_NAME}.service.\n`);
-  } else {
-    io.out(`${SERVICE_NAME}.service is not installed.\n`);
+    io.out(`Removed ${name}.service.\n`);
   }
+  if (!removed) io.out(`${SERVICE_NAME}.service is not installed.\n`);
   return 0;
 }
