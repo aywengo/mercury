@@ -183,7 +183,8 @@ Record: [`docs/fleet-bots-design.md`](docs/fleet-bots-design.md)
 | #971 | Fleet: owner-scoped, paged `GET /fleet/runs` (FB2a) | done | #982 |
 | #972 | Fleet: availability-aware routing filter (FB1) | done | #1002 |
 | #973 | Bots: `FleetSchedulerClient` and `api.via: "fleet"` (FB2b) | done | #1016 |
-| #974 | End to end: a bot on host A dispatches through Fleet to host B (FB3) | open | — |
+| #974 | End to end: a bot on host A dispatches through Fleet to host B (FB3) | in progress | — |
+| #1080 | `GET /api/workflows` omits `enabled`, so Fleet refuses every workflow Run on every host | in progress | — |
 
 ## Fleet tenancy
 
