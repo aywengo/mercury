@@ -50,6 +50,8 @@ const ALLOWED_SRC = [
   'src/host/bots/status.ts',
   'src/host/bots/process.ts',
   'src/host/bots/service.ts',
+  'src/host/bots/provision.ts',
+  'src/host/bots/doctor.ts',
   // Host tooling (not server internals): the bot service commands reuse the same unit machinery
   // as `host service` (§10: "by the same machinery host service install uses").
   'src/host/service.ts',
