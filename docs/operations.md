@@ -373,7 +373,10 @@ authored by @aywengo cannot be self-approved and are merged through the bypass
 Walk this checklist before enabling the nightly bot service on the host
 (`deploy/nightly-bot.json.example`, alias `nightly`; issue #742). Every item is
 a precondition for the FIRST unattended night — re-check after any change to
-the host, the identity, or the ruleset.
+the host, the identity, or the ruleset. The general bot procedure (config,
+token copies, dispatch, upgrade, doctor) is [`bots.md`](bots.md); `mercury host
+setup` writes the scheduler-only pieces in one step (B4, #915), while this
+checklist adds the identity, ruleset and repo setup the nightly bot needs.
 
 1. **Identity exists and is named.** The `mercury-nightly` account is set up
    (name, avatar, not only the handle), and its token is present only in the
