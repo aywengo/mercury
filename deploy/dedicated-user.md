@@ -143,7 +143,25 @@ sudo launchctl bootstrap system /Library/LaunchDaemons/com.mercury.worker.plist
 sudo launchctl bootstrap system /Library/LaunchDaemons/com.mercury.bot.nightly.plist
 ```
 
-### 7. Verify the boundary, not just the uptime
+### 7. Decide what a leaking shell should find
+
+The new user has no `gh` login, so a tool shell that escapes the per-Run environment **fails**:
+`gh` says it is not logged in, and the Run reports the failure instead of becoming a person. That
+is the safe default and the one to keep when in doubt.
+
+If this host exists for one bot identity (design §12), you can instead give the service account that
+identity, so the same shell resolves to the bot rather than dying mid-Run:
+
+```bash
+sudo -u mercury -H /opt/homebrew/bin/gh auth login --hostname github.com --with-token \
+  < /Users/mercury/.config/mercury/secrets/mercury-nightly.pat
+sudo -u mercury -H /opt/homebrew/bin/gh auth status     # account mercury-nightly
+```
+
+Either choice is a host-level credential; neither is the operator's. The difference is only whether
+an escaping shell does the right thing or stops.
+
+### 8. Verify the boundary, not just the uptime
 
 ```bash
 curl -s http://127.0.0.1:3000/healthz
@@ -151,10 +169,19 @@ sudo -u mercury -H /Users/mercury/.local/bin/mercury host doctor     # agent cre
 sudo -u mercury -H gh auth status                                    # "not logged into any hosts"
 ```
 
-`agent credentials: PASS` is the assertion that matters: the worker's user has no `gh` login and no
-`github.com` keychain entry, so a tool shell that falls back finds nothing to become.
+`agent credentials: PASS` is the assertion that matters: the worker's user has no `gh` login of the
+operator's and no `github.com` keychain entry, so a tool shell that falls back cannot become a person.
 
-Then run one real Run and check the identity it reports — the probe in #1060's acceptance.
+Then prove it from inside a Run — the probe in #1060's acceptance. Create a Run whose task is one
+tool command and read the result:
+
+```bash
+curl -s -X POST http://127.0.0.1:3000/runs -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  -d '{"agent":"primeagent","prompt":"Run exactly: gh api user --jq .login ; whoami ; echo \"GH_CONFIG_DIR=$GH_CONFIG_DIR\""}'
+```
+
+The identity must be `mercury-nightly` (or the command must fail with "not logged in" if you kept
+step 7's safe default), `whoami` must be `mercury`, and never `aywengo`.
 
 ### Rollback
 
