@@ -8,6 +8,123 @@ and this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.5] - 2026-10-24
+
+A patch release about identity. `mercury host doctor` reports whether the worker's OS user holds
+GitHub credentials of its own; the nightly skill files proposals through a duplicate check that can
+find a punctuated title, and only through `propose`; and the documentation states the rule that a
+mis-provisioned host broke on 2026-10-23 — a credential profile's token must be the account it claims.
+
+### Added
+
+- **`host doctor` reports the worker user's GitHub credentials (#1060, PR #1061).** A new
+  `agent credentials: PASS|WARN` line (and an `agentCredentials` field in `--json`) reads
+  `gh auth status`'s output, names the account, and on macOS also reports a `github.com` internet
+  password in the login keychain. A host whose worker user is logged in to GitHub can hand a Run that
+  person's identity through any tool shell that falls back to `$HOME`.
+- **`deploy/dedicated-user.md`: running the host as its own OS user (#1060, PR #1062).** The macOS
+  migration (create the user, copy state, rewrite paths, system LaunchDaemons with `UserName`), the
+  Linux equivalent, the verification, and the rollback.
+
+### Changed
+
+- **A credential profile's token must be the identity it claims (#1060, PR #1063).** CP-4 injects the
+  profile's `GH_TOKEN` and the Run's tools use it, so a stale secret file silently makes every Run act
+  as whoever that token belongs to. `docs/configuration.md` states the rule with its one-line check;
+  `docs/operations.md` checklist item 3b makes it routine.
+- **`nightly` 1.7.1 / `issue-fix-loop` 1.6.0.** Proposals are filed only through `next.ts propose` or
+  `next.ts blocked`; a Run whose `gh` reports an account other than the bot identity stops instead of
+  writing.
+
+### Fixed
+
+- **Nightly duplicate detection by search terms, not a quoted title (#1053, PR #1054).** GitHub search
+  is token-based, so `in:title "<exact title>"` returned nothing for any title containing punctuation,
+  and the dedupe check read as "not filed yet". The source leg queries the source key and the title leg
+  queries its alphanumeric terms, both compared exactly client-side; an unreadable page, a cap hit or
+  an incomplete result still fails closed.
+
+## [0.2.4] - 2026-10-23
+
+A patch release. Two host-side fixes protect what the host says about itself — a migration that claimed
+a version whose objects were missing, and a credential profile that accepted an owner id no Run could
+match. The release pipeline now discloses a channel it could not update, and the nightly skill stops
+being blind: it checks the model before it claims, names the Runs that failed, and files proposals again.
+
+### Fixed
+
+- **`mercury migrate` verifies the schema, not the version number (#1032, #1034).** A database whose
+  `schema_migrations` claimed a version while a table was missing kept starting, and every Run creation
+  then returned 500. The verifier compares `sqlite_master` and `PRAGMA table_info` against the expected
+  schema.
+- **`credentials validate` refuses an owner id that can never match (#1035, #1038).** A placeholder
+  owner id was accepted, and the profile then refused every Run the bot created.
+- **The release body discloses a Homebrew formula it could not update (#1029, #1046).** The push uses
+  the operator identity; when it is refused the job corrects the published body before failing.
+- **A probe that never answered reads `HTTP 000`, not `HTTP 000000` (#1045, #1047).**
+- **The npm channel state is read from the registry (#994, #1017).**
+- **The A2A blocking-bound test fails on the clock, not on a race (#1030, #1039).**
+
+### Added
+
+- **Credential profiles may inject `MERCURY_API_URL` and `MERCURY_API_TOKEN` (#1010, #1049).** The only
+  `MERCURY_*` names a profile may set; they exist so the nightly skill can read the host API.
+
+### Changed
+
+- **The nightly skill checks the model endpoint before the ladder claims (#1040, #1041).**
+- **The nightly report lists the Runs that failed (#1042, #1043).**
+- **Rung 4 dedupes through the search API, so it files proposals again (#1018, #1048).**
+- **The rung-1 e2e gate reports `configured` / `absent` / `half-configured` / `unevaluable` (#1010, #1049).**
+
+## [0.2.3] - 2026-10-22
+
+A short release carrying what merged after 0.2.2: the A2A binding, the layered local Run environment,
+redaction of agent artifacts at rest, and the two nightly-loop fixes that stop a Run from ending
+silently.
+
+### Added
+
+- **A2A binding A0-1..A0-4 (#995, #996, #998, #1000).** `@a2a-js/sdk` pinned at `1.3.0` and its REST
+  binding mounted on Mercury's server (`src/a2a/`, enabled by `MERCURY_A2A_*`). The Run chain maps to
+  an A2A task state exhaustively over `RunStatus`, a Run carries a server-only origin so the binding
+  can filter by it, and a retry links its predecessor inside the insert transaction so the retry
+  intent survives a crash.
+- **Layered local Run environment CP-4 (#977, `src/worker/runEnvironment.ts`).** A local Run's base
+  environment is built in the four layers of the credential-profiles design instead of the worker's
+  `process.env` wholesale, with an isolated `GH_CONFIG_DIR` and a generated gitconfig. A `file:`
+  credential source that is missing at drive time fails the Run; it never falls back to the worker's
+  environment.
+- **`run.unpushed_commits` (#1024, #1025).** On COMPLETED the worker compares the workspace's
+  `HEAD` with its remote-tracking refs over the Run's own `baseCommit..HEAD`, and records the branch
+  and the commits that were never pushed. The Run detail shows an `unpushed N` badge. Nothing is
+  pushed and no fetch is made in the finalize path.
+
+### Changed
+
+- **A resumed attempt settles its own exit (#997, #1011).** A resumed session no longer inherits the
+  previous attempt's exit gate, so a resume that ends without a goal report is FAILED rather than
+  inheriting the first attempt's success.
+
+### Fixed
+
+- **Secrets are redacted from agent artifacts at rest (#944, #965).** Session transcripts
+  (`.mercury-sessions/*.jsonl`) and the other agent-state directories are rewritten through the same
+  redactor the event store uses before the workspace is kept.
+
+### Nightly tooling
+
+These ship inside the package's skill library (`.agents/skills/`), so they reach a host on upgrade.
+
+- `issue-fix-loop` 1.5.0: a Run is not done until it pushed, commented on the PR, and called the exit
+  path — a progress message is never a stopping point.
+- `nightly` 1.6.2: the digest gained "Runs that ended with unpushed commits" and "Runs that never
+  called finish/blocked", both naming the Run and its worktree; it always states the host version and
+  the loaded `issue-fix-loop` version and warns when that is older than `main`.
+- The flake section is windowed to the night and normalizes test paths (#964, #1013), a claim whose
+  Run ended with no PR and no comment is released (#1001, #1009), and a workflow opens an issue on a
+  morning with no nightly report (#1020, #1021).
+
 ## [0.2.2] - 2026-10-18
 
 Two weeks of nightly self-development, plus four feature slices. The headline is **advisory Workflow

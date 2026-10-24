@@ -90,8 +90,8 @@ refuses to start if the file exists with wider permissions (the same rule as `bo
 | --- | --- |
 | `name` | Stable id, `[a-z0-9-]{1,40}`. Recorded on Runs; never secret. |
 | `repositories` | Normalized repository ids (§5.2). Exact match or a trailing `/*` for an org or user. |
-| `owners` | Run owners allowed to use this profile. Required and non-empty. No wildcard. |
-| `env` | Variables injected into the Run. Values are `{ "file": path }` (read at use time) or `{ "value": … }`. Names matching `^MERCURY_` are refused. |
+| `owners` | Run owners allowed to use this profile. Required and non-empty. No wildcard. Compared **literally** against the caller's owner id (`bot-<alias>` for a bot, the token's owner for a human), so an entry containing whitespace, `<>`, quotes or `:` is refused: it can never match, and a profile that claims a repository while allowing no real owner refuses every Run against it (#1035). |
+| `env` | Variables injected into the Run. Values are `{ "file": path }` (read at use time) or `{ "value": … }`. Names matching `^MERCURY_` are refused, except `MERCURY_API_URL` and `MERCURY_API_TOKEN`: those two exist so the nightly skill can read the host API (the rung-1 e2e gate, #1010), and no Mercury code reads either name. |
 | `git.authorName` / `authorEmail` | Set as author and committer for git in the Run. |
 | `git.httpsToken` | Name of an `env` entry that git uses as the HTTPS credential for the profile's repositories. |
 | `sandbox` | Whether a sandboxed Run of this profile receives the profile's `env` (§7). Default `false`. |

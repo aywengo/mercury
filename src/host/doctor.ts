@@ -84,6 +84,9 @@ export interface DoctorResult {
   /** Laya sidecar probe (#830, Laya design §5.3). Absent when MERCURY_LAYA_URL is unset —
    *  absence is the default, not a warning. */
   laya?: { ok: boolean; detail: string; latencyMs?: number; checkpoint?: string };
+  /** The worker user's own GitHub credentials (#1060). A warning, never a failure: the host is
+   *  usable, but a Run's tool shell can act as that account. */
+  agentCredentials?: AgentCredentialRisk;
 }
 
 /** Bounded GET with a timeout. Returns { status, body } or an error detail. */
@@ -282,6 +285,79 @@ export async function checkLaya(baseUrl: string, apiKey: string | undefined, tim
   return { ok: false, detail: `${result.reason}: ${result.detail ?? 'no detail'}`, latencyMs: Math.round(result.latencyMs) };
 }
 
+/**
+ * #1060: an agent's own tool shell can reach credentials the Run's environment was built to hide.
+ *
+ * The worker builds a per-Run environment (CP-4): the profile's `GH_TOKEN`, a per-Run
+ * `GH_CONFIG_DIR`, no host gitconfig. But an agent harness runs its tools in a kernel of its own —
+ * a daemon process that was NOT started with that environment — so a `gh` there reads
+ * `$HOME/.config/gh/hosts.yml` and acts as whoever the worker's OS user is logged in as. Measured
+ * on 2026-10-23: four nightly issues were filed as the operator.
+ *
+ * The doctor cannot see inside a harness, but it can see the state that any such fallback
+ * escalates to, and warn before a Run discovers it.
+ */
+export interface AgentCredentialRisk {
+  ok: boolean;
+  detail: string;
+  /** The account `gh` is logged in as, when one is found. */
+  ghLogin?: string;
+  /** Whether a `github.com` internet password exists in the login keychain (macOS). */
+  keychain?: boolean;
+}
+
+/** Parse `gh auth status` output for a github.com login. Exported for the test: the doctor's
+ *  warning is only useful if it reads the real command's output, not a guess. */
+export function ghLoginFromStatus(stdout: string): string | null {
+  // "  ✓ Logged in to github.com account aywengo (/home/x/.config/gh/hosts.yml)"
+  // The account name is the token after "account"; the path in parentheses varies by platform.
+  const m = /Logged in to github\.com account (\S+)/.exec(stdout);
+  return m ? m[1]! : null;
+}
+
+/** Pure verdict, so the warning text is tested without running anything. */
+export function describeAgentCredentialRisk(found: { ghLogin: string | null; keychain: boolean }): AgentCredentialRisk {
+  const parts: string[] = [];
+  if (found.ghLogin) parts.push(`\`gh\` is logged in as ${found.ghLogin}`);
+  if (found.keychain) parts.push('a github.com internet password exists in the login keychain');
+  if (parts.length === 0) {
+    return { ok: true, detail: 'no gh login and no github.com keychain entry for the worker user' };
+  }
+  return {
+    ok: false,
+    detail:
+      `${parts.join(' and ')}. A Run's tool shell can fall back to these when a harness runs its tools ` +
+      'outside the per-Run environment, and then acts as that account instead of the bot identity (#1060). ' +
+      'Run the worker as a dedicated OS user, or `gh auth logout -h github.com`.',
+    ...(found.ghLogin ? { ghLogin: found.ghLogin } : {}),
+    ...(found.keychain ? { keychain: true } : {}),
+  };
+}
+
+/** Probe the worker user's own credentials. Bounded: a hung `gh` or `security` must not hang the
+ *  doctor. `run` is injected so the test does not depend on this machine's login state. */
+export function checkAgentCredentials(
+  run: (cmd: string, args: string[]) => { code: number; stdout: string } = (cmd, args) => {
+    try {
+      const stdout = execFileSync(cmd, args, { timeout: 5000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+      return { code: 0, stdout };
+    } catch (e) {
+      const err = e as { status?: number; stdout?: string };
+      return { code: err.status ?? 1, stdout: typeof err.stdout === 'string' ? err.stdout : '' };
+    }
+  },
+  platform: NodeJS.Platform = process.platform,
+): AgentCredentialRisk {
+  const status = run('gh', ['auth', 'status', '-h', 'github.com']);
+  // `gh auth status` exits 1 when NO host is logged in, so the exit code alone is not the signal;
+  // the line is. Reading the code instead would warn on every unauthenticated host.
+  const ghLogin = ghLoginFromStatus(status.stdout);
+  const keychain = platform === 'darwin'
+    ? run('security', ['find-internet-password', '-s', 'github.com']).code === 0
+    : false;
+  return describeAgentCredentialRisk({ ghLogin, keychain });
+}
+
 export async function runHostDoctor(
   args: string[],
   io: { out: (s: string) => void; err: (s: string) => void } = {
@@ -374,11 +450,13 @@ export async function runHostDoctor(
       }
     }
   }
-  const result: DoctorResult = { healthz, bindHealthz, smoke, allSmokeSkipped: anySkipped, noHarnesses, ...(laya !== undefined ? { laya } : {}) };
+  const agentCredentials = checkAgentCredentials();
+  const result: DoctorResult = { healthz, bindHealthz, smoke, allSmokeSkipped: anySkipped, noHarnesses, agentCredentials, ...(laya !== undefined ? { laya } : {}) };
   if (json) {
     io.out(JSON.stringify(result, null, 2) + '\n');
   } else {
     io.out(`healthz: ${healthz.ok ? 'PASS' : 'FAIL'} — ${healthz.detail}\n`);
+    io.out(`agent credentials: ${agentCredentials.ok ? 'PASS' : 'WARN'} — ${agentCredentials.detail}\n`);
     if (laya) {
       io.out(`laya: ${laya.ok ? 'PASS' : 'FAIL'} — ${laya.detail}${laya.latencyMs !== undefined ? ` (${laya.latencyMs}ms)` : ''}\n`);
     }

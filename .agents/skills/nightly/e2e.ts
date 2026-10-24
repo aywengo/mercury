@@ -196,6 +196,12 @@ function rawRedactor(): ReturnType<typeof createRedactor> {
   return rawRedactorInstance;
 }
 
+/** Redact arbitrary text with the skill's layers (declared secrets + forwarded credentials).
+ * Exported for report.ts: a failed Run's `error` string reaches a public issue body too (#1042). */
+export function redactText(text: string): string {
+  return rawRedactor().redact(text);
+}
+
 /** Test hook: drop the memoized redactor so a later call re-reads the environment. */
 export function resetRawRedactorForTests(): void {
   rawRedactorInstance = null;

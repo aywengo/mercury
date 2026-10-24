@@ -155,7 +155,7 @@ test('a label the selector cannot verify (no timeline actor) never reaches rung 
 
 test('finish removes nightly:in-progress (the success exit path)', async () => {
   const { io, calls } = ioWith([], {});
-  const out = await finishIssue(io, { repo: REPO, issue: 10 });
+  const out = await finishIssue(io, { repo: REPO, issue: 10 }, ENV);
   assert.equal(out.removed, true);
   const del = calls.find((c) => c.method === 'DELETE');
   assert.ok(del);
@@ -164,12 +164,12 @@ test('finish removes nightly:in-progress (the success exit path)', async () => {
 
 test('blocked labels, comments the question, and removes the claim — the Run never asks', async () => {
   const { io, calls } = ioWith([], {});
-  const out = await blockIssue(io, { repo: REPO, issue: 12, reason: 'Which of two presets should win?' });
+  const out = await blockIssue(io, { repo: REPO, issue: 12, reason: 'Which of two presets should win?' }, ENV);
   assert.equal(out.newlyLabeled, true);
   // An idempotent retry (label already present) reports newlyLabeled: false, not a failure:
   const { io: io2, setNewly } = ioWith([], {});
   setNewly(false);
-  const out2 = await blockIssue(io2, { repo: REPO, issue: 12, reason: 'Which of two presets should win?' });
+  const out2 = await blockIssue(io2, { repo: REPO, issue: 12, reason: 'Which of two presets should win?' }, ENV);
   assert.equal(out2.newlyLabeled, false);
   assert.equal(out2.removed, true);
   assert.equal(out.commented, true);
@@ -186,7 +186,7 @@ test('blocked labels, comments the question, and removes the claim — the Run n
 
 test('blocked refuses an empty reason (a blocked exit without a question is a silent stall)', async () => {
   const { io } = ioWith([], {});
-  await assert.rejects(() => blockIssue(io, { repo: REPO, issue: 12, reason: '   ' }), /--reason/);
+  await assert.rejects(() => blockIssue(io, { repo: REPO, issue: 12, reason: '   ' }, ENV), /--reason/);
 });
 
 test('blockedAlready reads the label state for idempotent retries', async () => {
@@ -201,7 +201,7 @@ test('a failed comment POST keeps the claim and fails hard (blocked = label + qu
   // Override post to return a 503:
   const failingIo: NextIo = { ...io, async post() { return { body: {}, status: 503 }; } };
   await assert.rejects(
-    () => blockIssue(failingIo, { repo: REPO, issue: 14, reason: 'Which preset wins?' }),
+    () => blockIssue(failingIo, { repo: REPO, issue: 14, reason: 'Which preset wins?' }, ENV),
     /question comment was not accepted/,
   );
   // The claim is NOT removed:
@@ -212,8 +212,8 @@ test('a failed comment POST keeps the claim and fails hard (blocked = label + qu
 test('exit paths validate the repo too (they interpolate it into API paths)', async () => {
   const { io } = ioWith([], {});
   // 'no-slash' fails the owner/name shape in every entry point:
-  await assert.rejects(() => finishIssue(io, { repo: 'no-slash', issue: 1 }), /owner\/name/);
-  await assert.rejects(() => blockIssue(io, { repo: 'no-slash', issue: 1, reason: 'x' }), /owner\/name/);
+  await assert.rejects(() => finishIssue(io, { repo: 'no-slash', issue: 1 }, ENV), /owner\/name/);
+  await assert.rejects(() => blockIssue(io, { repo: 'no-slash', issue: 1, reason: 'x' }, ENV), /owner\/name/);
   await assert.rejects(() => runNext(io, ENV, { repo: 'no-slash', dryRun: false }), /owner\/name/);
 });
 
@@ -238,7 +238,7 @@ test('a 422 that is NOT already-exists fails hard (a blocked exit must not proce
     async postLabel() { throw new Error('POST /labels -> 422 validation failed: Invalid request'); },
   };
   await assert.rejects(
-    () => blockIssue(ioBad, { repo: REPO, issue: 15, reason: 'Needs a human decision' }),
+    () => blockIssue(ioBad, { repo: REPO, issue: 15, reason: 'Needs a human decision' }, ENV),
     /422 validation failed/,
   );
   assert.equal(calls.filter((c) => c.method === 'DELETE').length, 0, 'no claim release without the label');
@@ -268,7 +268,7 @@ test('blocked exit: the body marker is written ONLY for issues the nightly ident
   const userFiled = [{ ...issue({ number: 21, user: { login: 'aywengo' } }), body: 'a human wrote this' } as unknown as GhIssue];
   // nightly-filed: the body is patched with the trailing invisible marker, original body preserved.
   const a = ioWith(nightlyFiled, {});
-  await blockIssue(a.io, { repo: REPO, issue: 20, reason: 'Which retry policy?' });
+  await blockIssue(a.io, { repo: REPO, issue: 20, reason: 'Which retry policy?' }, ENV);
   const patchA = a.calls.find((c) => c.method === 'PATCH');
   assert.ok(patchA, 'nightly-filed issue gets the body marker');
   const bodyA = String((patchA!.body as { body: string }).body);
@@ -276,11 +276,11 @@ test('blocked exit: the body marker is written ONLY for issues the nightly ident
   assert.match(bodyA, /<!-- nightly:blocking-question\nWhich retry policy\?\n-->$/, 'trailing marker');
   // user-filed: no PATCH at all (the nightly must not edit user-authored bodies).
   const b = ioWith(userFiled, {});
-  await blockIssue(b.io, { repo: REPO, issue: 21, reason: 'Which retry policy?' });
+  await blockIssue(b.io, { repo: REPO, issue: 21, reason: 'Which retry policy?' }, ENV);
   assert.equal(b.calls.find((c) => c.method === 'PATCH'), undefined, 'user-authored body untouched');
   // A second blocked exit REPLACES the prior marker instead of stacking.
   const twice = ioWith([{ ...issue({ number: 20, user: { login: 'mercury-nightly' } }), body: 'defect report body\n\n<!-- nightly:blocking-question\nold question\n-->' } as unknown as GhIssue], {});
-  await blockIssue(twice.io, { repo: REPO, issue: 20, reason: 'newer question' });
+  await blockIssue(twice.io, { repo: REPO, issue: 20, reason: 'newer question' }, ENV);
   const patchTwice = twice.calls.find((c) => c.method === 'PATCH')!;
   const bodyTwice = String((patchTwice.body as { body: string }).body);
   assert.ok(!bodyTwice.includes('old question'), 'prior marker replaced');
@@ -288,6 +288,6 @@ test('blocked exit: the body marker is written ONLY for issues the nightly ident
   // A failed body patch does not fail the blocked exit (the comment remains the source of truth).
   const failing = ioWith(nightlyFiled, {});
   const failingIo: NextIo = { ...failing.io, async patch() { throw new Error('network gone'); } };
-  const out = await blockIssue(failingIo, { repo: REPO, issue: 20, reason: 'still blocked' });
+  const out = await blockIssue(failingIo, { repo: REPO, issue: 20, reason: 'still blocked' }, ENV);
   assert.equal(out.commented, true, 'the blocked exit survives a body-marker failure');
 });

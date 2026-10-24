@@ -180,6 +180,23 @@ test('every example task template carries a repository (#785)', () => {
   }
 });
 
+test('the example pins a model for every task the preflight checks (#1040)', () => {
+  // SKILL.md 1.7.0 tells the nightly-next Run to run the model preflight, and the preflight reads the
+  // model from THAT TASK'S template.model. An example without the pin makes `next.ts run` exit 1 with
+  // "pins no model" and the ladder never runs -- the same class of trap as the missing repository in
+  // #785, one layer earlier.
+  const cfg = readExample();
+  const next = (cfg.schedule.tasks as Record<string, unknown>[]).find((t) => t.name === 'nightly-next');
+  assert.ok(next, 'the example has a nightly-next task');
+  const model = (next!.template as { model?: unknown }).model;
+  assert.equal(typeof model, 'string', 'nightly-next pins template.model');
+  assert.ok((model as string).trim() !== '', 'the pin is not an empty string');
+
+  // And the loader forwards it verbatim, so the Run that the preflight runs inside really carries it.
+  const resolved = resolveTemplate(taskOf('nightly-next'), { date: '2026-01-01', time: '00:00', iso: 'w2026-01-01T00:00' }) as { model?: string };
+  assert.equal(resolved.model, model);
+});
+
 test('a resolved example template passes RunService.create and persists the repository (#785)', () => {
   // The failure was at WORKSPACE SETUP in the worker, which only sees what create PERSISTED.
   // Drive the real create path (worker disabled - create must not touch the workspace) with the

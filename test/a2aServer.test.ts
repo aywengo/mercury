@@ -15,7 +15,7 @@ import { EventStream } from '../src/events/eventStream.ts';
 import { A2A_AGENT_CARD_PATH, A2A_PREFIX, A2A_SKILL_SELECTION_EXTENSION, BOT_OWNER_PREFIX, type A2aConfig } from '../src/a2a/config.ts';
 import { botOwnerId } from '../src/host/bots/keys.ts';
 import { createRunTaskStore } from '../src/a2a/taskStore.ts';
-import { makeEnv, makeGitRepo, tempDir } from './helpers.ts';
+import { makeEnv, makeGitRepo, tempDir, waitFor } from './helpers.ts';
 
 const SKILL_ID = 'fix-a-test';
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
@@ -541,8 +541,16 @@ test('section 6.6: the blocking bound follows a persisted retry due time, not ju
       assert.equal(res.status, 200);
       const task = ((await res.json()) as { task?: TaskBody & { status?: { state?: string } } }).task;
       assert.ok(task?.id);
-      assert.equal(env.runs.listChain(task.id).length, 2, 'the wait must cover a backoff longer than the margin');
+      // Assert the TIMING first: a wait that ended before the backoff is the failure this test is
+      // for, and a chain-length mismatch reads like a logic error instead (#1030).
       assert.ok(elapsed >= 700, `the wait must include the whole backoff, waited ${elapsed}ms`);
+      // Then the chain. The retry Run is created by the worker's poll loop, so on a loaded runner it
+      // can land a moment after the response: wait for it with a deadline instead of racing it. The
+      // assertion above already pins that the response waited through the backoff, so this wait
+      // cannot hide a too-short bound.
+      const taskId = task.id;
+      await waitFor(() => env.runs.listChain(taskId).length === 2, 5000);
+      assert.equal(env.runs.listChain(taskId).length, 2, 'the wait must cover a backoff longer than the margin');
       assert.equal(task.status?.state, 'TASK_STATE_FAILED', 'the wait must not end on the retry-pending attempt');
     } finally { await srv.close(); close(); }
   } finally { env.close(); }

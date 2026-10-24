@@ -44,6 +44,22 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The formula step at the end pushes a commit to `main`, and `main` IS protected: the
+          # ruleset requires a pull request and the `ci` check, so a push authenticated as the
+          # GITHUB_TOKEN is refused with GH013 -- AFTER npm has staged and the GitHub Release has
+          # been created, leaving Homebrew on the previous version (#1029, observed on host-v0.2.3).
+          # Check out with the operator PAT so the persisted git credential is the bypass identity,
+          # the same mechanism plan-sync uses; a remote override alone would not work, because
+          # checkout's persisted Authorization header takes precedence over a token in the URL.
+          #
+          # `|| github.token` because checkout REFUSES an empty token input: with the secret unset
+          # the job died at step 1 and released nothing at all, which is worse than the formula bug
+          # this replaced (#1051). The fallback keeps the release, the assets and the npm stage
+          # working; the push that needs the bypass identity is the last step and already fails
+          # loudly, correcting the published body when it is refused.
+          token: ${{ secrets.OPERATOR_PAT || github.token }}
+          persist-credentials: true
 
       - uses: actions/setup-node@v4
         with:
@@ -56,6 +72,9 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_DIRECT_PUBLISH: ${{ vars.NPM_DIRECT_PUBLISH }}
           DRY_RUN: ${{ github.event_name == 'workflow_dispatch' }}
+          # Presence is what the warning below reads; the value never reaches the log. The checkout
+          # above already carries it, but a step's env is not inherited from another step (#1051).
+          OPERATOR_PAT: ${{ secrets.OPERATOR_PAT }}
           # Which product a rehearsal derives its tag from. Passed as an env var rather than
           # interpolated into the script body, so the step stays free of ${{ }} expressions and the
           # harness in test/releaseWorkflow.test.ts can execute this script directly.
@@ -304,9 +323,19 @@ jobs:
           # The gate asks the registry instead of hard-coding the package name, so it removes itself the
           # day @aywengo/mercury-fleet exists. A token still passes, because a token is exactly how that
           # first publish gets made.
+          # One three-digit answer, always. `curl -w '%{http_code}'` already writes `000` when the
+          # request fails, so an `|| echo 000` fallback appends a SECOND one and the notices built
+          # from it read `HTTP 000000` (or a two-line value) on a DNS or connection failure (#1045).
+          http_code() {
+            local code
+            code=$(curl -sS --max-time 30 -o /dev/null -w '%{http_code}' "$1" 2>/dev/null) || code=000
+            case "$code" in
+              [0-9][0-9][0-9]) printf '%s' "$code" ;;
+              *) printf '%s' 000 ;;
+            esac
+          }
           if [ "$product" = "fleet" ] && [ "${npm_auth_mode:-}" != "token" ]; then
-            if [ "$(curl -sS --max-time 30 -o /dev/null -w '%{http_code}' \
-              "https://registry.npmjs.org/${pkg_esc}" || echo 000)" = "404" ]; then
+            if [ "$(http_code "https://registry.npmjs.org/${pkg_esc}")" = "404" ]; then
               echo "refusing ${tag}: ${pkg_name} does not exist on the registry (HTTP 404)." >&2
               echo "  Fleet ships only through npm, so this tag would create a GitHub Release with no" >&2
               echo "  asset and then fail -- nothing installable." >&2
@@ -510,8 +539,7 @@ jobs:
             if grep -qE 'EPUBLISHCONFLICT|cannot publish over|previously published' "$npm_log"; then
               echo "  cause: ${product} ${version} is already on the registry. A version number cannot" >&2
               echo "         be reused; delete the tag and cut the next one." >&2
-            elif [ "$(curl -sS --max-time 30 -o /dev/null -w '%{http_code}' \
-                     "https://registry.npmjs.org/${pkg_esc}" || echo 000)" = "404" ]; then
+            elif [ "$(http_code "https://registry.npmjs.org/${pkg_esc}")" = "404" ]; then
               # The comment above says a rejected publisher and a nonexistent package look identical in
               # npm's log. They do -- but not to the registry, whose package metadata is public. One
               # request settles which this is, and the Fleet product makes the difference concrete:
@@ -561,21 +589,144 @@ jobs:
           # formula lives here rather than in a separate tap repo"). Probing aywengo/homebrew-tap --
           # which holds an unrelated product's formulae -- reported 404 for a channel that works, and
           # would have suppressed a true install path from every future release body.
-          formula_live=$(curl -sS --max-time 30 -o /dev/null -w '%{http_code}' \
-            "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/Formula/mercury-ai.rb" \
-            || echo 000)
+          formula_live=$(http_code "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/Formula/mercury-ai.rb")
           # Whether this VERSION is installable is a different fact from whether THIS RUN published
           # it, and the body is a promise to readers about the former. A publish can fail on a version
           # that is already on the registry -- a re-tag, or a version published outside CI -- and the
           # job then correctly says "already on the registry" while the body said "not on the npm
           # registry" and "unavailable by every channel". Both sentences were in the same run. Ask the
           # registry which is true rather than inferring installability from this job's exit status.
-          version_live="000"
-          if [ "$npm_ok" = "0" ]; then
-            version_live=$(curl -sS --max-time 30 -o /dev/null -w '%{http_code}' \
-              "https://registry.npmjs.org/${pkg_esc}/${version}" || echo 000)
+          #
+          # The same rule governs a SUCCESSFUL submission (#994). The verb this run used is a statement
+          # about the COMMAND, not about the outcome: `npm stage publish` defers proof-of-presence to a
+          # maintainer, so the version may be live anyway -- approved after the submit, or published
+          # before by someone else -- and a body that read the verb and wrote "awaiting maintainer
+          # approval" then sends a reader to Homebrew for no reason. Measured on host-v0.2.2: the body
+          # said awaiting approval while the registry served 0.2.2 and `latest` pointed at it.
+          #
+          # So probe the registry for THIS version and branch on the ANSWER. The verb survives only to
+          # word the one case the answer cannot explain on its own: a version the registry does not
+          # serve, staged or not.
+          npm_version_http() {
+            http_code "https://registry.npmjs.org/${pkg_esc}/${version}"
+          }
+          # Probed on every path, including a rehearsal: the fail-last messages below read this answer,
+          # and a rehearsal whose dry-run publish failed must report the registry's answer rather than
+          # a 000 the step never asked for.
+          version_live=$(npm_version_http)
+          # A run that just published directly expects the registry to serve the version. The packument
+          # can lag the publish by a few seconds, and one probe taken immediately would put "not
+          # confirmed" on the body of a version that IS installable -- a false negative is still a false
+          # statement about what a reader can install. Retry briefly before concluding anything.
+          # Bounded, so a registry that is down costs seconds, not the job. Not in a rehearsal: nothing
+          # was submitted, so there is no publish for the registry to catch up with.
+          if [ "${DRY_RUN:-}" != "true" ] && [ "$npm_ok" = "1" ] \
+            && [ "$npm_verb" != "stage publish" ] && [ "$version_live" != "200" ]; then
+            attempt=0
+            while [ "$attempt" -lt 5 ] && [ "$version_live" != "200" ]; do
+              attempt=$((attempt + 1))
+              sleep 2
+              version_live=$(npm_version_http)
+            done
           fi
-          if [ "$npm_ok" = "0" ] && [ "$version_live" = "200" ]; then
+          if [ "${DRY_RUN:-}" = "true" ]; then
+            # A rehearsal submitted nothing, so it has no channel state to describe. Every section
+            # below is a claim about what a registry serves, and there is no honest version of that
+            # claim for a run that never submitted anything. The notes are discarded here anyway (no
+            # release is created), but a "pending approval" line written by a rehearsal is exactly the
+            # assertion-without-observation this block exists to remove -- and the stage-id grep below
+            # would read a submission log the rehearsal never wrote.
+            :
+          elif [ "$npm_ok" = "1" ] && [ "$version_live" = "200" ]; then
+            # Observed: the registry serves this version, so the `npm install` line already in the
+            # notes is true and needs no qualifier. Silent is the correct output -- a section saying
+            # "published" would repeat the claim the notes already make, and "awaiting approval" would
+            # contradict the probe (#994).
+            :
+          elif [ "$npm_ok" = "1" ] && [ "$npm_verb" = "stage publish" ]; then
+            # npm prints "(staged with id <uuid>)" and approval is `npm stage approve <uuid>`, which
+            # needs a 2FA code and so can never be done by this job. Naming the id turns "go find it in
+            # the UI" into one command, and makes it obvious which staged version this run created when
+            # several are waiting. The shape is npm's own UUID_REGEX from lib/utils/validate-uuid.js, so
+            # what we extract is exactly what `npm stage approve` will accept -- a looser class would
+            # happily capture a 36-char hex digest and print a command that errors out. -i mirrors the
+            # /i on npm's own regex: the registry generates the id, so its case is not ours to assume.
+            # The log is read only when it exists: a run that submitted nothing has no id to name, and
+            # grepping the missing file put "No such file or directory" in the log of every rehearsal.
+            stage_id=""
+            if [ -f "$npm_log" ]; then
+              stage_id=$(grep -oiEm1 'staged with id [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' "$npm_log" | awk '{print $NF}' || true)
+            fi
+            {
+              echo ""
+              echo "## npm package awaiting maintainer approval"
+              echo ""
+              echo "This run **staged** the package on the npm registry, so a maintainer still has to"
+              echo "approve it."
+              echo ""
+              # Only a 404 on the version itself licenses "the registry does not serve it". A 000 from
+              # curl, a 403 or a 5xx says nothing, and the sentence that follows is the reason a reader
+              # waits instead of installing -- so it carries the answer it is based on.
+              if [ "$version_live" = "404" ]; then
+                echo "The registry does not serve this version yet, and staged publishing defers"
+                echo "proof-of-presence to a maintainer, so \`npm install\` will not resolve it until"
+                echo "it is approved."
+              else
+                echo "The registry could not confirm this version (HTTP \`${version_live}\`), so"
+                echo "nothing here shows it is installable. Staged publishing defers proof-of-presence"
+                echo "to a maintainer: check the staged package before announcing this version."
+              fi
+              if [ -n "$stage_id" ]; then
+                echo ""
+                echo "\`\`\`bash"
+                echo "npm stage approve $stage_id     # needs a 2FA code; run it locally"
+                echo "\`\`\`"
+                echo ""
+                echo "Or on npmjs.com under **Published packages -> Staged packages**."
+              else
+                echo "Approve it on npmjs.com under **Published packages -> Staged packages**."
+              fi
+              echo ""
+              if [ "$product" = "host" ] && [ "$formula_live" = "200" ]; then
+                echo "The assets attached to this release and the Homebrew formula are already live and"
+                echo "need no npm approval."
+              elif [ "$product" = "host" ]; then
+                echo "The asset attached to this release is live and needs no npm approval. The Homebrew"
+                echo "formula could not be confirmed (HTTP ${formula_live}); check it before offering"
+                echo "\`brew install\` to users."
+              else
+                echo "Nothing else is attached to this release and there is no Homebrew formula for"
+                echo "${product_display}, so approval on npmjs.com is the only way this version becomes installable."
+              fi
+            } >> "$notes"
+          elif [ "$npm_ok" = "1" ]; then
+            # npm reported success and the registry still does not serve the version. Naming the
+            # discrepancy is the only honest option: staying silent leaves the notes' `npm install`
+            # line standing as if it resolved, and "awaiting approval" would assert a staging state a
+            # direct publish never had.
+            # Same discipline as above: a 404 licenses "does not serve it", anything else is an
+            # unanswered question, and the body must not turn one into the other.
+            if [ "$version_live" = "404" ]; then
+              VERSION_WHY="the registry does not serve it (HTTP 404)"
+            else
+              VERSION_WHY="the registry could not confirm it (HTTP \`${version_live}\`)"
+            fi
+            {
+              echo ""
+              echo "## npm package: published, but not confirmed on the registry"
+              echo ""
+              echo "\`npm ${npm_verb}\` reported success for \`${pkg_name}@${version}\`, but"
+              echo "${VERSION_WHY} when asked afterwards, so the \`npm install\` instruction above"
+              echo "may not resolve. Confirm it before offering it:"
+              echo ""
+              echo "\`\`\`bash"
+              echo "npm view ${pkg_name}@${version} version"
+              echo "\`\`\`"
+              echo ""
+              echo "The job is not marked failed: npm reported no error, and a registry that lags a"
+              echo "publish is not a release defect. Treat the npm channel as unconfirmed."
+            } >> "$notes"
+          elif [ "$version_live" = "200" ]; then
             {
               echo ""
               echo "## npm package: this version is published, but not by this run"
@@ -594,7 +745,7 @@ jobs:
               echo ""
               echo "The job that produced this release is marked failed so the discrepancy stays visible."
             } >> "$notes"
-          elif [ "$npm_ok" = "0" ]; then
+          else
             {
               echo ""
               echo "## npm package not available for this release"
@@ -643,45 +794,6 @@ jobs:
               echo ""
               echo "The job that produced this release is marked failed so the npm gap stays visible."
             } >> "$notes"
-          elif [ "$npm_verb" = "stage publish" ]; then
-            # npm prints "(staged with id <uuid>)" and approval is `npm stage approve <uuid>`, which
-            # needs a 2FA code and so can never be done by this job. Naming the id turns "go find it in
-            # the UI" into one command, and makes it obvious which staged version this run created when
-            # several are waiting. The shape is npm's own UUID_REGEX from lib/utils/validate-uuid.js, so
-            # what we extract is exactly what `npm stage approve` will accept -- a looser class would
-            # happily capture a 36-char hex digest and print a command that errors out. -i mirrors the
-            # /i on npm's own regex: the registry generates the id, so its case is not ours to assume.
-            stage_id=$(grep -oiEm1 'staged with id [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' "$npm_log" | awk '{print $NF}' || true)
-            {
-              echo ""
-              echo "## npm package awaiting maintainer approval"
-              echo ""
-              echo "This run **staged** the package on the npm registry. Staged publishing defers"
-              echo "proof-of-presence to a maintainer, so \`npm install\` will not resolve this version"
-              echo "until it is approved."
-              if [ -n "$stage_id" ]; then
-                echo ""
-                echo "\`\`\`bash"
-                echo "npm stage approve $stage_id     # needs a 2FA code; run it locally"
-                echo "\`\`\`"
-                echo ""
-                echo "Or on npmjs.com under **Published packages -> Staged packages**."
-              else
-                echo "Approve it on npmjs.com under **Published packages -> Staged packages**."
-              fi
-              echo ""
-              if [ "$product" = "host" ] && [ "$formula_live" = "200" ]; then
-                echo "The assets attached to this release and the Homebrew formula are already live and"
-                echo "need no npm approval."
-              elif [ "$product" = "host" ]; then
-                echo "The asset attached to this release is live and needs no npm approval. The Homebrew"
-                echo "formula could not be confirmed (HTTP ${formula_live}); check it before offering"
-                echo "\`brew install\` to users."
-              else
-                echo "Nothing else is attached to this release and there is no Homebrew formula for"
-                echo "${product_display}, so approval on npmjs.com is the only way this version becomes installable."
-              fi
-            } >> "$notes"
           fi
 
           # M6: publish install.sh and its sha256 alongside the host release, so the
@@ -712,9 +824,17 @@ jobs:
           # Publish the Homebrew formula LAST, and only once the asset it points at exists. A formula
           # committed before the release would 404 for anyone who ran brew install in the window, and a
           # formula pointing at an asset that was never uploaded fails checksum resolution with nothing
-          # to correlate it to. main is not branch-protected, so the contents:write token this job
-          # already has is sufficient -- no cross-repository credential is needed because the formula
-          # lives here rather than in a separate tap repo.
+          # to correlate it to.
+          #
+          # `main` IS branch-protected (ruleset: pull request + the `ci` check), so this push needs the
+          # bypass identity: the checkout above uses `secrets.OPERATOR_PAT` for exactly that reason
+          # (#1029). The formula lives in this repository rather than a separate tap, so no
+          # cross-repository credential is involved.
+          # Name the missing capability in the log rather than letting it surface as a refused push:
+          # an operator reading "GH013" has to know which secret the push was supposed to carry.
+          if [ -z "${OPERATOR_PAT:-}" ]; then
+            echo "::warning::OPERATOR_PAT is not set: the formula push will authenticate as GITHUB_TOKEN and the main ruleset will refuse it, so Homebrew stays on the previous version. Add the secret to fix it (#1051)."
+          fi
           if [ "${DRY_RUN:-}" = "true" ]; then
             echo "DRY RUN: not touching Formula/mercury-ai.rb (bundle sha256=${bundle_sha:-n/a})"
           elif [ "$product" = "host" ]; then
@@ -726,7 +846,30 @@ jobs:
               echo "Formula/mercury-ai.rb already at ${version}"
             else
               git commit -m "release: Homebrew formula ${version}"
-              git push "https://github.com/${GITHUB_REPOSITORY}.git" HEAD:main
+              # `origin` carries the PAT from the checkout above; building a URL from the repository
+              # name would authenticate as the GITHUB_TOKEN and be refused by the ruleset (#1029).
+              if ! git push origin HEAD:main; then
+                # The release body was written BEFORE this push, and it says the Homebrew formula is
+                # live for this version. On a refused push that is false -- brew installs the previous
+                # one -- so correct the PUBLISHED body before failing: a reader of the release page is
+                # the audience that matters, not the Actions log (#1029 review).
+                {
+                  echo ""
+                  echo "## Homebrew was not updated for this release"
+                  echo ""
+                  echo "The push that updates \`Formula/mercury-ai.rb\` was refused by the branch"
+                  echo "protection rules on \`main\`, so \`brew install aywengo/mercury/mercury-ai\`"
+                  echo "still installs the PREVIOUS version. Any Homebrew statement above describes"
+                  echo "the channel, not this release."
+                  echo ""
+                  echo "The npm package and the asset attached here are unaffected. See #1029."
+                } >> "$notes"
+                if ! gh release edit "$tag" --notes-file "$notes"; then
+                  echo "::warning::could not annotate the release body with the Homebrew failure; the body still claims Homebrew is live" >&2
+                fi
+                echo "::error::Formula/mercury-ai.rb ${version} could not be pushed to main; Homebrew still installs the previous version. See #1029."
+                exit 1
+              fi
             fi
           fi
 

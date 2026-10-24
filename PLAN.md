@@ -38,6 +38,8 @@ Record: [`docs/host-installer.md`](docs/host-installer.md)
 | #636 | M5: lifecycle — mercury host status/upgrade/uninstall + re-run guard | done | #637 |
 | #638 | M6: release hardening — bats suite, installer CI matrix, checksum, install docs | done | #639 |
 | #929 | Host installer: the four "gate open" milestones (M1, M3, M4, M6) are verification work… | open | — |
+| #1029 | release: the formula push to main is refused by the ruleset, so every release leaves Homebrew… | done | #1046 |
+| #1045 | release: a failed curl probe yields HTTP 000000 in the release notes (and the test stub hides it) | done | #1047 |
 
 ## Nightly self-development
 
@@ -57,6 +59,10 @@ Record: [`docs/nightly-self-development.md`](docs/nightly-self-development.md)
 | #964 | nightly: report lists a one-night flake forever; the flake entry carries an absolute wo… | done | #1013 |
 | #968 | nightly: resume PRs on the owner's changes-requested review, not only on Copilot findings | done | #969 |
 | #980 | nightly: resume its own PRs when the required ci check is red, not only on reviews | in progress | #981 |
+| #1020 | nightly: nothing notices a night with no report (host down 2026-10-19→20) | done | #1021 |
+| #1023 | URGENT nightly host runs Mercury 0.2.0/0.2.1: stale skills; resume Runs commit but never push | done | — |
+| #1024 | nightly: flag Runs that end with unpushed commits or without finish/blocked; report the loaded skill version | done | #1025 |
+| #1026 | nightly: #1024 follow-ups from the #1025 round-2 review (scan budget, host-wide unpushed section, ledger temp race, doc drift) | open | — |
 | #1001 | nightly: a claim whose Run ended with no PR and no comment is never released; rung 2 claims work with no ready signal | done | #1009 |
 
 ## Dispatcher bots
@@ -135,6 +141,7 @@ Record: [`docs/credential-profiles-design.md`](docs/credential-profiles-design.m
 | #899 | Credential profiles CP-6: sandbox per-profile opt-in for profile credentials | open | — |
 | #900 | Credential profiles CP-7: exact-value redaction of profile values, doctor checks, docs… | open | — |
 | #954 | Credential profiles: the three §15 open questions are live — decide the no-profile defa… | open | — |
+| #1035 | credentials validate: a placeholder owner id is accepted, and the profile then refuses every Run the bot creates | done | #1038 |
 
 ## Laya
 
@@ -209,6 +216,13 @@ on Mercury's own Express app, so A1 can start.
 | #988 | Server-stamped Run origin: a field no request body can set (A0-3) | done | #996 |
 | #990 | Pure Run-chain → A2A TaskState mapping, exhaustive over RunStatus (A0-4) | done | #998 |
 | #989 | Exposed-skill config, create-Run validation of every template, `host a2a validate` (A0-5) | open | — |
+| #1030 | test: a2aServer section 6.6 blocking-bound test is timing-flaky and can block a release PR | done | #1039 |
+| #1040 | nightly: a crashed model server still lets the Run claim an issue, so the night ends with 17 failed Runs and stale claims | done | #1041 |
+| #1042 | nightly report: a model outage makes the digest say _none_ everywhere, so a lost night reads as a quiet one | done | #1043 |
+| #1018 | nightly: rung 4 files nothing — the dedupe list walk caps at 10 pages (1000 items) and the repo has outgrown it | done | #1048 |
+| #1010 | nightly: the rung-1 e2e gate is permanently permissive because MERCURY_API_URL/TOKEN are never provisioned | done | #1049 |
+| #1051 | release: the workflow fails at checkout because the OPERATOR_PAT secret does not exist | done | #1052 |
+| #1053 | nightly: the dedupe search quotes its queries, so a title or marker with punctuation is never matched | done | #1054 |
 
 ## Security follow-ups
 
@@ -219,6 +233,15 @@ Record: [`docs/status.md`](docs/status.md)
 | #942 | security: GitHub revoked the nightly GH_TOKEN ('mercury-pat') after a PR-description le… | done | — |
 | #944 | redactor: session transcripts and kernel-state snapshots store Run secrets unredacted | done | #965 |
 | #976 | artifact redaction: sweep workspaces of runs the worker never finalized | open | — |
+| #1060 | security: nightly Runs filed issues as the operator — the profile's token file held the operator's PAT, not the bot's (CP-4 was working; the tool shell had the Run's GH_CONFIG_DIR and GH_TOKEN) | done | #1061, #1062, #1063 |
+
+## Release workflow
+
+Record: [`docs/releasing.md`](docs/releasing.md)
+
+| Issue | Title | State | PR |
+| --- | --- | --- | --- |
+| #994 | release: the npm notes section asserts an approval state it never observed | done | #1017 |
 
 ## Repository process
 
@@ -228,6 +251,7 @@ Record: [`PLAN.md`](PLAN.md) (rules above)
 | --- | --- | --- | --- |
 | #1004 | PLAN.md: move the closing-row update to a post-merge commit; open PRs conflict on adjacent rows | done | #1005 |
 | #1007 | scratch: verify plan-sync marks a closing issue done (issue #1004 e2e) | done | #1008 |
+| #1032 | migrate: schema_migrations can claim a version whose objects are missing, and every Run creation then returns 500 | done | #1034 |
 
 ## Host installer — milestone notes (historical)
 

@@ -24,6 +24,9 @@ import {
   runHostDoctor,
   schemeFor,
   checkLaya,
+  checkAgentCredentials,
+  describeAgentCredentialRisk,
+  ghLoginFromStatus,
 } from '../src/host/doctor.ts';
 import { startFakeLaya, validPick, type FakeLaya } from './support/fakeLaya.ts';
 import type { NetworkInterfaceInfo } from 'node:os';
@@ -720,3 +723,42 @@ test("runHostDoctor: a whitespace-only MERCURY_LAYA_URL is the padding error, no
   }
 });
 
+test('#1060: the doctor warns when the worker user has its own GitHub credentials', () => {
+  // The leak: an agent harness runs its tools in a kernel outside the per-Run environment, so a
+  // `gh` there reads the worker user's hosts.yml and acts as that account. The doctor cannot see
+  // inside a harness, but it can see the state such a fallback escalates to.
+  assert.equal(ghLoginFromStatus('  ✓ Logged in to github.com account aywengo (/home/x/.config/gh/hosts.yml)'), 'aywengo');
+  assert.equal(ghLoginFromStatus('You are not logged into any GitHub hosts.'), null);
+  assert.equal(ghLoginFromStatus(''), null, 'an empty answer must not invent a login');
+
+  // Pure verdict: the warning text has to name the account and the remedy, not just say "risk".
+  const risky = describeAgentCredentialRisk({ ghLogin: 'aywengo', keychain: true });
+  assert.equal(risky.ok, false);
+  assert.match(risky.detail, /aywengo/);
+  assert.match(risky.detail, /keychain/);
+  assert.match(risky.detail, /dedicated OS user/);
+  assert.equal(risky.ghLogin, 'aywengo');
+
+  const clean = describeAgentCredentialRisk({ ghLogin: null, keychain: false });
+  assert.equal(clean.ok, true);
+
+  // And the probe reads the COMMAND's answer: `gh auth status` exits 1 when nothing is logged in,
+  // so the exit code alone must not be the signal.
+  const noLogin = checkAgentCredentials((cmd) => ({ code: 1, stdout: cmd === 'gh' ? 'You are not logged into any GitHub hosts.' : '' }), 'linux');
+  assert.equal(noLogin.ok, true, 'a non-zero gh exit with no login line is not a warning');
+
+  const login = checkAgentCredentials((cmd, args) => {
+    if (cmd === 'gh') return { code: 0, stdout: '  ✓ Logged in to github.com account mercury-nightly (x)' };
+    return { code: 0, stdout: '' };
+  }, 'linux');
+  assert.equal(login.ok, false);
+  assert.equal(login.ghLogin, 'mercury-nightly', 'the warning names whoever is logged in, bot or operator');
+
+  // The keychain probe only runs on macOS, where the command exists at all.
+  let asked: string[] = [];
+  checkAgentCredentials((cmd) => { asked.push(cmd); return { code: 1, stdout: '' }; }, 'darwin');
+  assert.deepEqual(asked, ['gh', 'security']);
+  asked = [];
+  checkAgentCredentials((cmd) => { asked.push(cmd); return { code: 1, stdout: '' }; }, 'linux');
+  assert.deepEqual(asked, ['gh'], 'no `security` call off macOS');
+});

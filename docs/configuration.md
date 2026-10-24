@@ -36,6 +36,14 @@ Creating a Run without `agent` uses `fake` (no coding-agent CLI). Migrations app
 when the process opens the database; `npm run migrate` is a verify/apply CLI, not a
 required first-run step.
 
+`mercury migrate` also **verifies** the result: it compares the live schema against one built from
+scratch by the same migration list, and exits non-zero naming any table, column, index or trigger
+that `schema_migrations` records as applied but the database does not have. A database can reach that
+state through a restore or a hand edit, and until #1032 the only symptom was every Run creation
+failing later with a missing column. The refusal prints the repair (`sqlite3 <db> ".backup <db>.bak"`
+first, then the missing objects); objects the migrations do not create are logged as a warning and do
+not fail the command.
+
 The QuickStart inline environment is for loopback only. Tokens and secret values
 must come from a protected environment file or secret manager in any shared or
 networked install. Do not place them in command-line arguments, repository files
@@ -209,6 +217,33 @@ accordingly, or move it to a `file:` source.
 no credential helper answers, and no environment variable turns that off. Keep no `~/.netrc` entry
 for a source-control host on a Mercury host, or treat such an entry as available to every Run.
 SSH credentials for a profile are CP-5's scope; in CP-4 profiles carry HTTPS credentials only.
+
+**A profile's token must be the identity it claims.** CP-4 injects the profile's `GH_TOKEN` into
+the Run, and the Run's tools use it: measured on 2026-10-24, a `python_repl` shell inside a Run saw
+the Run's `GH_CONFIG_DIR` and `GH_TOKEN`, and `gh api user` answered with that token's account.
+Nothing checks that the account is the intended one. On 2026-10-23 four nightly proposals were filed
+as the operator because `secrets/mercury-nightly.pat` still held the operator's PAT from before the
+host's `GH_TOKEN` was swapped for the bot's (#1060). After any token change, confirm each profile's
+identity:
+
+```bash
+GH_TOKEN=$(cat ~/.config/mercury/secrets/<file>) gh api user --jq .login
+```
+
+**Not covered: credentials an agent harness brings itself.** The layers above govern the
+environment Mercury builds and the process it spawns. They do not reach inside an agent harness
+that starts processes with an environment of its own. A `gh` there reads
+`$HOME/.config/gh/hosts.yml`, and a `git` there reads the login keychain, so the Run acts as the
+worker's OS user.
+
+The boundary is therefore: **CP-4 protects what Mercury starts; it cannot protect what the harness
+starts.** Two consequences:
+
+- `mercury host doctor` reports `agent credentials: WARN` when the worker's user has a `gh` login
+  or a `github.com` keychain entry, because that is exactly what a leak escalates to.
+- The recommended deployment is a **dedicated OS user for the worker** (design §12, runbook:
+  [`deploy/dedicated-user.md`](../deploy/dedicated-user.md)): with no `gh` login, no keychain entry
+  and no agent state of its own, a leaking tool shell fails instead of acting as a person.
 
 ## PrimeAgent
 

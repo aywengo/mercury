@@ -75,7 +75,7 @@ function threadNodes(): unknown[] {
 
 test('blocked --pr derives the current-head findings and appends them to the question (#860)', async () => {
   const { io, log } = makeIo({ reviewThreads: { totalCount: 6, pageInfo: { hasNextPage: false }, nodes: threadNodes() } });
-  const res = await blockIssue(io, { repo: 'aywengo/mercury', issue: 860, reason: 'review-round cap reached', pr: PR });
+  const res = await blockIssue(io, { repo: 'aywengo/mercury', issue: 860, reason: 'review-round cap reached', pr: PR }, { GH_TOKEN: 'test-token' });
   assert.equal(res.commented, true);
   assert.equal(log.labelPosts, 1, 'the blocked label is still applied');
   assert.equal(log.labelDeletes, 1, 'the in-progress claim is still released');
@@ -92,7 +92,7 @@ test('blocked --pr derives the current-head findings and appends them to the que
 test('blocked --pr refuses a stated count that differs from the derived one, posting NOTHING (#860)', async () => {
   const { io, log } = makeIo({ reviewThreads: { totalCount: 6, pageInfo: { hasNextPage: false }, nodes: threadNodes() } });
   await assert.rejects(
-    () => blockIssue(io, { repo: 'aywengo/mercury', issue: 860, reason: 'PR has 11 open findings', pr: PR }),
+    () => blockIssue(io, { repo: 'aywengo/mercury', issue: 860, reason: 'PR has 11 open findings', pr: PR }, { GH_TOKEN: 'test-token' }),
     /11[\]\s][\s\S]*2 open Copilot/,
   );
   assert.equal(log.labelPosts, 0, 'the label must NOT be applied when the count is refused');
@@ -102,16 +102,16 @@ test('blocked --pr refuses a stated count that differs from the derived one, pos
 test('blocked --pr accepts a reason with no stated count and one with the matching count', async () => {
   const nodes = threadNodes();
   const { io, log } = makeIo({ reviewThreads: { totalCount: 6, pageInfo: { hasNextPage: false }, nodes } });
-  await blockIssue(io, { repo: 'aywengo/mercury', issue: 860, reason: 'review-round cap reached', pr: PR });
+  await blockIssue(io, { repo: 'aywengo/mercury', issue: 860, reason: 'review-round cap reached', pr: PR }, { GH_TOKEN: 'test-token' });
   assert.equal(log.comments.length, 1);
   const { io: io2, log: log2 } = makeIo({ reviewThreads: { totalCount: 6, pageInfo: { hasNextPage: false }, nodes } });
-  await blockIssue(io2, { repo: 'aywengo/mercury', issue: 860, reason: '2 open findings remain; how should the preset store contract be shaped?', pr: PR });
+  await blockIssue(io2, { repo: 'aywengo/mercury', issue: 860, reason: '2 open findings remain; how should the preset store contract be shaped?', pr: PR }, { GH_TOKEN: 'test-token' });
   assert.equal(log2.comments.length, 1);
 });
 
 test('blocked --pr fails closed: a capped thread query appends could-not-derive and still blocks (#860)', async () => {
   const { io, log } = makeIo({ reviewThreads: { totalCount: 6, pageInfo: { hasNextPage: true }, nodes: [] } });
-  const res = await blockIssue(io, { repo: 'aywengo/mercury', issue: 860, reason: 'review-round cap reached', pr: PR });
+  const res = await blockIssue(io, { repo: 'aywengo/mercury', issue: 860, reason: 'review-round cap reached', pr: PR }, { GH_TOKEN: 'test-token' });
   assert.equal(res.commented, true);
   assert.equal(log.labelPosts, 1);
   assert.match(log.comments[0]!, /could NOT be derived/);
@@ -120,7 +120,7 @@ test('blocked --pr fails closed: a capped thread query appends could-not-derive 
 
 test('blocked --pr fails closed on a non-200 thread query too (#860)', async () => {
   const { io, log } = makeIo({ reviewThreads: null, threadsStatus: 500 });
-  const res = await blockIssue(io, { repo: 'aywengo/mercury', issue: 860, reason: 'review-round cap reached', pr: PR });
+  const res = await blockIssue(io, { repo: 'aywengo/mercury', issue: 860, reason: 'review-round cap reached', pr: PR }, { GH_TOKEN: 'test-token' });
   assert.equal(res.commented, true);
   assert.equal(log.labelPosts, 1);
   assert.match(log.comments[0]!, /could NOT be derived/);
@@ -129,7 +129,7 @@ test('blocked --pr fails closed on a non-200 thread query too (#860)', async () 
 test('blocked --pr with an unreadable PR throws before any write (#860)', async () => {
   const { io, log } = makeIo({ reviewThreads: { totalCount: 2, pageInfo: { hasNextPage: false }, nodes: [] }, pulls: { body: null, status: 404 } });
   await assert.rejects(
-    () => blockIssue(io, { repo: 'aywengo/mercury', issue: 860, reason: 'cap reached', pr: PR }),
+    () => blockIssue(io, { repo: 'aywengo/mercury', issue: 860, reason: 'cap reached', pr: PR }, { GH_TOKEN: 'test-token' }),
     /could not read PR/,
   );
   assert.equal(log.labelPosts, 0);
@@ -149,7 +149,7 @@ test('statedFindingCounts: narrow - prose numbers (issue/PR numbers) never trip 
 test('blocked --pr: a reason that names the PR after its count is not refused (#966)', async () => {
   const { io, log } = makeIo({ reviewThreads: { totalCount: 6, pageInfo: { hasNextPage: false }, nodes: threadNodes() } });
   // "2 open findings on PR #842": the old count regexes read 842 as a second count and refused.
-  await blockIssue(io, { repo: 'aywengo/mercury', issue: 860, reason: '2 open findings on PR #842; how should the store contract be shaped?', pr: PR });
+  await blockIssue(io, { repo: 'aywengo/mercury', issue: 860, reason: '2 open findings on PR #842; how should the store contract be shaped?', pr: PR }, { GH_TOKEN: 'test-token' });
   assert.equal(log.comments.length, 1, 'the matching count is accepted and the hand-off is posted');
   assert.equal(log.labelPosts, 1);
   assert.match(log.comments[0]!, /- open findings on this head: 2/);
@@ -158,7 +158,7 @@ test('blocked --pr: a reason that names the PR after its count is not refused (#
 test('blocked --pr: the head line shows the FETCHED PR head, not the reviewed commit (#966)', async () => {
   // The review was submitted on sha-head-1; the PR has since advanced to HEAD (sha-head-2).
   const { io, log } = makeIo({ reviewThreads: { totalCount: 6, pageInfo: { hasNextPage: false }, nodes: threadNodes() }, reviewCommit: 'sha-head-1' });
-  await blockIssue(io, { repo: 'aywengo/mercury', issue: 860, reason: 'review-round cap reached', pr: PR });
+  await blockIssue(io, { repo: 'aywengo/mercury', issue: 860, reason: 'review-round cap reached', pr: PR }, { GH_TOKEN: 'test-token' });
   const body = log.comments[0]!;
   assert.match(body, /- head: sha-head-2/, 'the current head is the fetched head');
   assert.match(body, /- last Copilot review: sha-head-1 at 2026-10-05T00:44:00Z/, 'the reviewed commit keeps its own line');
@@ -170,7 +170,7 @@ test('blocked --pr: the head line still shows the fetched head when no Copilot r
   // Strip the Copilot review: only the PR-head read remains.
   const get = io.get;
   io.get = async (path: string) => (path.includes(`/pulls/${PR}/reviews`) ? { body: [], status: 200, link: null } : get(path));
-  await blockIssue(io, { repo: 'aywengo/mercury', issue: 860, reason: 'review-round cap reached', pr: PR });
+  await blockIssue(io, { repo: 'aywengo/mercury', issue: 860, reason: 'review-round cap reached', pr: PR }, { GH_TOKEN: 'test-token' });
   const body = log.comments[0]!;
   assert.match(body, /- head: sha-head-2/, 'never "unknown" while the head was fetched');
   assert.match(body, /- last Copilot review: none/);
@@ -180,7 +180,7 @@ test('blocked --pr: a failed reviews read fails closed instead of reporting an a
   // A non-JSON 502 body arrives as `body: null`; the thread query succeeds. Reading that as an
   // empty review list made the hand-off authoritative ("no last Copilot review", a derived count).
   const { io, log } = makeIo({ reviewThreads: { totalCount: 6, pageInfo: { hasNextPage: false }, nodes: threadNodes() }, reviewsStatus: 502 });
-  const res = await blockIssue(io, { repo: 'aywengo/mercury', issue: 860, reason: 'review-round cap reached', pr: PR });
+  const res = await blockIssue(io, { repo: 'aywengo/mercury', issue: 860, reason: 'review-round cap reached', pr: PR }, { GH_TOKEN: 'test-token' });
   assert.equal(res.commented, true);
   assert.equal(log.labelPosts, 1, 'the issue is still labeled nightly:blocked');
   const body = log.comments[0]!;
