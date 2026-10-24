@@ -436,6 +436,117 @@ export async function e2eGate(env: NodeJS.ProcessEnv): Promise<{ terminal: boole
   }
 }
 
+/** One finding bound to the CURRENT head: where it lives and its first line (#860). */
+export interface CopilotHeadFinding {
+  path: string;
+  line: number | null;
+  snippet: string;
+}
+
+/** The Copilot review state of one PR at a given head (#860): the LAST Copilot-authored REST
+ * review, and the UNRESOLVED, NOT-OUTDATED threads whose first comment is the Copilot
+ * reviewer's AND was authored against `headSha`. Shared by select.ts's resume scan and
+ * next.ts's `blocked --pr` hand-off: ONE implementation of the current-head filter, so the
+ * selector's resume verdict and the hand-off text can never disagree (#860).
+ * `complete: false` means a read capped or failed: the finding list is UNKNOWN - callers must
+ * treat it as neither zero nor authoritative (fail closed, #820 r3). */
+export interface CopilotHeadState {
+  complete: boolean;
+  lastCopilot: { commit_id?: string | null; state?: string | null; submitted_at?: string | null } | null;
+  /** The owner's latest CHANGES_REQUESTED / APPROVED / DISMISSED review (#968), or null. */
+  lastOwner: { commit_id?: string | null; state?: string | null } | null;
+  findings: CopilotHeadFinding[];
+}
+
+/** Derive the current-head Copilot findings for one PR over an injected transport. */
+export async function copilotHeadState(
+  io: {
+    get: (path: string) => Promise<{ body: unknown; status: number; link?: string | null }>;
+    postJson?: (path: string, body: unknown) => Promise<{ body: unknown; status: number }>;
+  },
+  repo: string,
+  prNumber: number,
+  headSha: string,
+  logPrefix = 'resume scan',
+): Promise<CopilotHeadState> {
+  const out: CopilotHeadState = { complete: true, lastCopilot: null, lastOwner: null, findings: [] };
+  // Last Copilot review on this PR (REST, bounded at 5 pages).
+  let rvPath: string | null = `/repos/${repo}/pulls/${prNumber}/reviews?per_page=50`;
+  let rvPages = 0;
+  try {
+    while (rvPath && rvPages < 5) {
+      const page = (await io.get(rvPath)) as { body: unknown; link?: string | null };
+      // A 200 whose body could not be decoded (`shared.ghGet` returns `body: null`) is a FAILED
+      // review read, not an empty review list. Reading it as empty left `complete` true, so a
+      // caller's hand-off claimed "no last Copilot review" on a broken read (Copilot, #966).
+      if (!Array.isArray(page.body)) throw new Error(`GET ${rvPath} returned a body that is not a list`);
+      const body = page.body as { user?: { login?: string | null }; commit_id?: string | null; state?: string | null; submitted_at?: string | null }[];
+      const link = page.link;
+      for (const rv of body) {
+        // Exact login: a lookalike account (copilot-pull-request-reviewer-x) must neither
+        // replace the last review nor fake a verdict (#820 r5).
+        // The owner's LATEST deciding review (#968). COMMENTED/PENDING do not change a PR's
+        // review decision on GitHub, so they never override an earlier CHANGES_REQUESTED.
+        if (rv.user?.login === TRUSTED_AUTHOR
+          && (rv.state === 'CHANGES_REQUESTED' || rv.state === 'APPROVED' || rv.state === 'DISMISSED')) {
+          out.lastOwner = rv; // exact login, same trust root as the ladder; oldest-first pages
+          continue;
+        }
+        if (rv.user?.login !== COPILOT_REVIEWER) continue;
+        out.lastCopilot = rv; // pages are oldest-first; keep the last seen
+      }
+      rvPages++;
+      const rvNext = link?.match(/<([^>]+)>;\s*rel="next"/)?.[1]?.replace('https://api.github.com', '') ?? null;
+      rvPath = rvNext !== null && rvNext.includes(`/pulls/${prNumber}/reviews?`) ? rvNext : null;
+    }
+    out.complete = !rvPath;
+    // Pending findings: UNRESOLVED, NOT-OUTDATED review threads whose first comment is the
+    // Copilot reviewer's AND was authored against the CURRENT head (#820 r3, blocker 4): a
+    // clean current-head review must not inherit an older review's stale threads, an unrelated
+    // reviewer's thread must not count, and a thread from a previous review round (older
+    // commit) belongs to the resolved history.
+    if (io.postJson) {
+      const gql = {
+        query: `query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100){totalCount,pageInfo{hasNextPage},nodes{isResolved,isOutdated,comments(first:1){nodes{author{login},body,path,originalLine,originalCommit{oid}}}}}}}}`,
+        variables: { owner: repo.split('/')[0] ?? '', name: repo.split('/')[1] ?? '', number: prNumber },
+      };
+      const res = await io.postJson('/graphql', gql);
+      if (res.status !== 200) {
+        console.error(`${logPrefix}: PR #${prNumber} reviewThreads query -> ${res.status}`);
+        out.complete = false;
+      } else {
+        const threads = (res.body as { data?: { repository?: { pullRequest?: { reviewThreads?: { totalCount?: number; pageInfo?: { hasNextPage?: boolean }; nodes?: { isResolved?: boolean; isOutdated?: boolean; comments?: { nodes?: { author?: { login?: string | null } | null; body?: string | null; path?: string | null; originalLine?: number | null; originalCommit?: { oid?: string | null } | null }[] } | null }[] } } } } }).data?.repository?.pullRequest?.reviewThreads;
+        if (!threads || threads.pageInfo?.hasNextPage) {
+          out.complete = false; // capped query fails closed
+        } else {
+          out.findings = (threads.nodes ?? [])
+            .filter((t) =>
+              t.isResolved === false
+              && t.isOutdated === false
+              && COPILOT_THREAD_AUTHORS.has(t.comments?.nodes?.[0]?.author?.login ?? '')
+              && t.comments?.nodes?.[0]?.originalCommit?.oid === headSha
+            )
+            .map((t) => {
+              const c = t.comments?.nodes?.[0] ?? null;
+              return {
+                path: c?.path ?? '(unknown path)',
+                line: typeof c?.originalLine === 'number' ? c.originalLine : null,
+                snippet: (c?.body ?? '').split('\n')[0] ?? '',
+              };
+            });
+        }
+      }
+    } else {
+      console.error(`${logPrefix}: io.postJson missing; cannot verify pending findings`);
+      out.complete = false;
+    }
+  } catch (e) {
+    console.error(`${logPrefix}: PR #${prNumber} threads failed: ${String(e instanceof Error ? e.message : e)}`);
+    out.complete = false;
+  }
+  return out;
+}
+
 /** The boolean half of `e2eGate`, kept for the ladder (which only needs the answer). */
 export async function e2eRunTerminal(env: NodeJS.ProcessEnv): Promise<boolean> {
   return (await e2eGate(env)).terminal;
@@ -785,73 +896,15 @@ export async function runSelectorWith(
         const issueCandidate = openIssues.get(issue)!;
         const headSha = pr.head?.sha ?? '';
         if (!headSha) continue;
-        // Last Copilot review on this PR.
-        let lastCopilot: { commit_id?: string | null; state?: string | null } | null = null;
-        // The owner's LATEST deciding review (#968). COMMENTED/PENDING do not change a PR's
-        // review decision on GitHub, so they never override an earlier CHANGES_REQUESTED.
-        let lastOwner: { commit_id?: string | null; state?: string | null } | null = null;
-        let unresolvedOnPr = 0;
-        let rvPath: string | null = `/repos/${repo}/pulls/${pr.number}/reviews?per_page=50`;
-        let rvPages = 0;
-        let rvScanComplete = false;
-        try {
-          while (rvPath && rvPages < 5) {
-            const { body, link } = (await io.get(rvPath)) as { body: { user?: { login?: string | null }; commit_id?: string | null; state?: string | null }[]; link?: string | null };
-            for (const rv of body ?? []) {
-              // Exact login: a lookalike account (copilot-pull-request-reviewer-x) must neither
-              // replace the last review nor fake a verdict (#820 r5).
-              if (rv.user?.login === TRUSTED_AUTHOR
-                && (rv.state === 'CHANGES_REQUESTED' || rv.state === 'APPROVED' || rv.state === 'DISMISSED')) {
-                lastOwner = rv; // exact login, same trust root as the ladder; oldest-first pages
-                continue;
-              }
-              if (rv.user?.login !== COPILOT_REVIEWER) continue;
-              lastCopilot = rv; // pages are oldest-first; keep the last seen
-            }
-            rvPages++;
-            const rvNext = link?.match(/<([^>]+)>;\s*rel="next"/)?.[1]?.replace('https://api.github.com', '') ?? null;
-            rvPath = rvNext !== null && rvNext.includes(`/pulls/${pr.number}/reviews?`) ? rvNext : null;
-          }
-          rvScanComplete = !rvPath;
-          // Pending findings: UNRESOLVED, NOT-OUTDATED review threads whose first comment is
-          // the Copilot reviewer's AND was authored against the CURRENT head (#820 r3,
-          // blocker 4): a clean current-head review must not inherit an older review's stale
-          // threads, an unrelated reviewer's thread must not count, and a thread from a
-          // previous review round (older commit) belongs to the resolved history.
-          if (io.postJson) {
-            const gql = {
-              query: `query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100){totalCount,pageInfo{hasNextPage},nodes{isResolved,isOutdated,comments(first:1){nodes{author{login},originalCommit{oid}}}}}}}}`,
-              variables: { owner: repo.split('/')[0] ?? '', name: repo.split('/')[1] ?? '', number: pr.number },
-            };
-            const res = await io.postJson('/graphql', gql);
-            if (res.status !== 200) {
-              console.error(`resume scan: PR #${pr.number} reviewThreads query -> ${res.status}`);
-              rvScanComplete = false;
-            } else {
-              const threads = (res.body as { data?: { repository?: { pullRequest?: { reviewThreads?: { totalCount?: number; pageInfo?: { hasNextPage?: boolean }; nodes?: { isResolved?: boolean; isOutdated?: boolean; comments?: { nodes?: { author?: { login?: string | null } | null; originalCommit?: { oid?: string | null } | null }[] } | null }[] } } } } }).data?.repository?.pullRequest?.reviewThreads;
-              if (!threads || threads.pageInfo?.hasNextPage) {
-                rvScanComplete = false; // capped query fails closed
-              } else {
-                unresolvedOnPr = (threads.nodes ?? []).filter((t) =>
-                  t.isResolved === false
-                  && t.isOutdated === false
-                  && COPILOT_THREAD_AUTHORS.has(t.comments?.nodes?.[0]?.author?.login ?? '')
-                  && t.comments?.nodes?.[0]?.originalCommit?.oid === headSha
-                ).length;
-              }
-            }
-          } else {
-            console.error('resume scan: io.postJson missing; cannot verify pending findings');
-            rvScanComplete = false;
-          }
-        } catch (e) {
-          console.error(`resume scan: PR #${pr.number} threads failed: ${String(e instanceof Error ? e.message : e)}`);
-          rvScanComplete = false;
-        }
-        if (!rvScanComplete) continue; // fail closed for THIS PR: no resume, but the issue stays reserved
+        // Current-head Copilot review state, via the shared helper (#860): ONE implementation
+        // of the current-head filter for the resume scan AND next.ts's `blocked --pr`.
+        const headState = await copilotHeadState(io as unknown as Parameters<typeof copilotHeadState>[0], repo, pr.number, headSha);
+        const lastCopilot = headState.lastCopilot;
+        if (!headState.complete) continue; // fail closed for THIS PR: no resume, but the issue stays reserved
         // Owner change request on the CURRENT head (#968): resume regardless of Copilot. A commit
         // pushed after the review moves the head, so an answered review waits for re-review
         // instead of being resumed again. Excluded issues never resume.
+        const lastOwner = headState.lastOwner;
         if (lastOwner !== null && lastOwner.state === 'CHANGES_REQUESTED' && lastOwner.commit_id === headSha
           && !isExcluded(issueCandidate.issue)) {
           resume.push({ issue, prNumber: pr.number, headSha, state: 'owner-changes', createdAt: pr.created_at ?? '' });
@@ -860,7 +913,7 @@ export async function runSelectorWith(
         const hasHeadReview = lastCopilot !== null && lastCopilot.commit_id === headSha;
         if (!hasHeadReview || lastCopilot === null) continue; // relay fetches the review first
         if (lastCopilot.state === 'APPROVED') continue; // awaiting merge; not resume work
-        if (unresolvedOnPr === 0) continue; // approval-class or fully addressed: awaits merge
+        if (headState.findings.length === 0) continue; // approval-class or fully addressed: awaits merge
         // Excluded issues (nightly:blocked after hand-off, proposed) never resume (#820 r1,
         // blocker 1): the review cannot re-open work a human must answer.
         if (isExcluded(issueCandidate.issue)) continue;
