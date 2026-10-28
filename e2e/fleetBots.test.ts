@@ -37,7 +37,13 @@ function tempDir(prefix: string): string {
 }
 after(() => {
   for (const dir of tmpDirs) {
-    try { rmSync(dir, { recursive: true, force: true }); } catch { /* cleanup must not fail a passing test */ }
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch (err) {
+      // A cleanup failure must not fail a test that passed (parity with test/helpers.ts),
+      // but a silent leak is the #73 L8 bug class, so say which dir survived.
+      console.error(`fleetBots: temp dir left behind: ${dir} (${err})`);
+    }
   }
 });
 
