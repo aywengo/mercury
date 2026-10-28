@@ -12,18 +12,34 @@
  *   node --test --test-timeout=180000 e2e/fleetBots.test.ts
  */
 
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { tempDir } from '../test/helpers.ts';
+import { tmpdir } from 'node:os';
 
 const ROOT = join(import.meta.dirname, '..');
 const ADMIN_A = 'tok-admin-a-0123456789abcdef';
 const ADMIN_B = 'tok-admin-b-0123456789abcdef';
 const FLEET_CALLER = 'bot-token-0123456789abcdef';
 const WORKFLOW_ID = 'only-on-b';
+
+// The E2E harness may only import node builtins, testcontainers and its own files (guard:
+// robustness.test.ts, "the harness never imports product code"), so this file carries its own
+// tempDir instead of importing test/helpers.ts: same mkdtemp semantics, and the same file-level
+// teardown with the same force flag (the fixture git repo marks objects read-only).
+const tmpDirs: string[] = [];
+function tempDir(prefix: string): string {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  tmpDirs.push(dir);
+  return dir;
+}
+after(() => {
+  for (const dir of tmpDirs) {
+    try { rmSync(dir, { recursive: true, force: true }); } catch { /* cleanup must not fail a passing test */ }
+  }
+});
 
 interface Proc { child: ChildProcess; stop: () => void }
 
