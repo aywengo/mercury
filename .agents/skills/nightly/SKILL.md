@@ -222,7 +222,7 @@ These are per-Run caps the agent enforces on itself; nobody is awake to stop a r
 
 | Limit | Value | When reached |
 | --- | --- | --- |
-| Review rounds per PR | 2 (`issue-fix-loop` step 5) | `blocked` with the open findings |
+| Review rounds per PR | 2 (`issue-fix-loop` step 5) | `blocked --pr <n>` with the DERIVED current-head findings (#860) |
 | PRs per Run | 1 | the Run ends; the next fire takes the next rung |
 | Diff growth | 3x the first passing version (`issue-fix-loop` step 2) | `blocked` with the size and why |
 | Pushes per review round | 1 (batched) | — |

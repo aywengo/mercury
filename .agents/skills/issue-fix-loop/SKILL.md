@@ -103,7 +103,11 @@ as a `blocked by` note rather than leaving it in prose.
      `next.ts finish`).
 7. **Hand off** — when the loop must stop early, write what was done, what is left and the
    exact question for a human. Interactive: ask. Unattended: use the calling skill's blocked
-   exit (for nightly: `next.ts blocked --reason "<question>"`). Hand off when any of these is
+   exit (for nightly: `next.ts blocked --reason "<question>"`). A hand-off caused by the
+   review-round cap MUST pass `--pr <n>` (for nightly: `next.ts blocked --reason "…" --pr <n>`):
+   "what is left" is then derived from the PR's current head — open Copilot findings only, never
+   the memory of earlier rounds — and a stated count that differs from the derived one is
+   refused (#860). Hand off when any of these is
    true:
    - the acceptance criteria are ambiguous or contradict the code;
    - the fix needs changes in more than 5 files outside the area the analysis identified;

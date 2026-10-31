@@ -29,7 +29,7 @@
  *                       [--task <bot task>] [--model <id>] [--bot <alias>] [--bot-config <path>]
  *                       [--base-url <url>] [--api-key <key>]
  *   node next.ts finish --repo owner/name --issue N
- *   node next.ts blocked --repo owner/name --issue N --reason "…"
+ *   node next.ts blocked --repo owner/name --issue N --reason "…" [--pr N]
  *   node next.ts propose --repo owner/name --source <key> --title "…" --body-file <path>  (#881)
  *
  * Output: exactly one JSON line. No dependencies; all I/O injectable.
@@ -38,7 +38,8 @@
 import { basename } from 'node:path';
 
 import { checkModel, defaultApiKey, defaultEndpoint, resolveTaskModel, type ModelCheck } from './model.ts';
-import { runSelectorWith, type E2eGateState } from './select.ts';
+import { copilotHeadState, runSelectorWith, type E2eGateState } from './select.ts';
+import type { CopilotHeadState } from './select.ts';
 import { assertRepo, ghToken, ghGet, ghPost, ghPatch, recordRunClaim, recordRunTerminal, FETCH_TIMEOUT_MS } from './shared.ts';
 
 const L_IN_PROGRESS = 'nightly:in-progress';
@@ -202,11 +203,112 @@ export async function finishIssue(io: NextIo, opts: { repo: string; issue: numbe
   return { removed };
 }
 
-/** The never-asks exit path: hand the question to a human via GitHub, remove the claim, finish. */
-export async function blockIssue(io: NextIo, opts: { repo: string; issue: number; reason: string }, env: NodeJS.ProcessEnv): Promise<{ removed: boolean; newlyLabeled: boolean; commented: boolean }> {
+/** A review-cap hand-off's derived count, stated in --reason by the agent (#860). */
+const REASON_COUNT_RES = [
+  // "11 open findings", "11 unresolved Copilot findings remain". The number must START a token
+  // (`(?<![\\d#])`): a `#842`-style reference is never a count, and the engine must not restart
+  // mid-number ("842" -> "42").
+  /(?<![\d#])(\d+)\s+(?:open\s+|unresolved\s+|remaining\s+|blocking\s+)*(?:copilot\s+|review\s+)*findings/gi,
+  // "open findings: 3", "findings = 3" - an EXPLICIT separator only. A looser form read the PR
+  // number in "2 open findings on PR #842" as a second count (842), so a valid hand-off was
+  // refused before it labeled or commented (Copilot, #966).
+  /\bfindings\s*[:=]\s*(\d+)/gi,
+] as const;
+
+/** The finding counts the agent's reason EXPLICITLY states (empty = none stated - fine; the
+ * derived block supplies the number). Deliberately narrow: only a stated count can be checked
+ * against the derivation, so prose numbers like issue or PR numbers never trip the refusal. */
+export function statedFindingCounts(reason: string): number[] {
+  const counts: number[] = [];
+  for (const re of REASON_COUNT_RES) {
+    for (const m of reason.matchAll(re)) {
+      const n = Number(m[1]);
+      if (Number.isInteger(n)) counts.push(n);
+    }
+  }
+  return counts;
+}
+
+/** The appended block text for a derived (complete) head state. `headSha` is the PR head that was
+ * FETCHED and that the findings were filtered against - not the commit of the last review, which
+ * lags whenever a push followed the review (Copilot, #966). */
+function derivedFindingsBlock(pr: number, headSha: string, state: CopilotHeadState): string {
+  const lines: string[] = [
+    '',
+    '',
+    `**Current-head Copilot findings on PR #${pr} (derived from the PR, not recalled):**`,
+    `- head: ${headSha}`,
+    `- last Copilot review: ${state.lastCopilot?.commit_id ?? 'none'}${state.lastCopilot?.submitted_at ? ` at ${state.lastCopilot.submitted_at}` : ''}`,
+    `- open findings on this head: ${state.findings.length}`,
+  ];
+  for (const f of state.findings) {
+    lines.push(`- ${f.path}:${f.line ?? '?'} — ${f.snippet}`);
+  }
+  return lines.join('\n');
+}
+
+/** The appended block when the derivation FAILED (capped or non-200): the count is unknown,
+ * never guessed (#860 acceptance 3). */
+function underivedFindingsBlock(pr: number): string {
+  return [
+    '',
+    '',
+    `**Current-head Copilot findings on PR #${pr}:** the finding count could NOT be derived (the review-thread query was capped or failed); do not trust any count in the text above - verify on the PR before acting.`,
+  ].join('\n');
+}
+
+/** The never-asks exit path: hand the question to a human via GitHub, remove the claim, finish.
+ * With `pr` set (a review-cap hand-off, #860), the current-head Copilot findings are DERIVED
+ * from the PR via the same shared helper the selector's resume scan uses, and appended to the
+ * question: "what is left" is the current head's open findings only, never the memory of
+ * earlier rounds. A reason that states a count DIFFERENT from the derived count is refused
+ * (throws, nothing posted); a failed derivation appends an explicit could-not-derive note and
+ * still blocks. */
+export async function blockIssue(io: NextIo, opts: { repo: string; issue: number; reason: string; pr?: number }, env: NodeJS.ProcessEnv): Promise<{ removed: boolean; newlyLabeled: boolean; commented: boolean }> {
   assertRepo(opts.repo);
   const reason = opts.reason.trim();
   if (reason === '') throw new Error('a blocked exit needs a non-empty --reason (the question a human must answer)');
+  let question = reason;
+  if (opts.pr !== undefined) {
+    if (!Number.isInteger(opts.pr) || opts.pr <= 0) throw new Error('--pr must be a positive PR number');
+    // The head SHA: the derivation binds findings to it, and the hand-off quotes it.
+    const prRes = await io.get(`/repos/${opts.repo}/pulls/${opts.pr}`);
+    if (prRes.status < 200 || prRes.status >= 300) {
+      throw new Error(`blocked --pr: could not read PR #${opts.pr} (GET returned ${prRes.status}); the head cannot be derived, so no count can be checked`);
+    }
+    const headSha = (prRes.body as { head?: { sha?: string | null } | null })?.head?.sha ?? '';
+    if (!headSha) throw new Error(`blocked --pr: PR #${opts.pr} has no head sha; cannot derive current-head findings`);
+    // The shared helper treats an unreadable review page as an EMPTY one: it reads `body ?? []`
+    // and never checks the status, so a 502/503 with a non-JSON body would look like "no last
+    // Copilot review" and keep `complete` true. Fail the read here instead (the same status check
+    // `runNext` applies to its transport) so it reaches the helper's fail-closed path (Copilot, #966).
+    const state = await copilotHeadState(
+      {
+        get: async (path: string) => {
+          const res = await io.get(path);
+          if (res.status < 200 || res.status >= 300) throw new Error(`GET ${path} -> ${res.status}`);
+          return res;
+        },
+        postJson: io.postJson ? async (path: string, body: unknown) => await io.postJson!(path, body) : undefined,
+      },
+      opts.repo,
+      opts.pr,
+      headSha,
+      'blocked --pr',
+    );
+    if (state.complete) {
+      // Refuse unsourced counts (#860 acceptance 2): a stated count that differs from the
+      // derived one means the reason was recalled, not derived - refuse BEFORE any write.
+      const stated = statedFindingCounts(reason);
+      if (stated.some((n) => n !== state.findings.length)) {
+        throw new Error(`blocked --pr: the reason states finding count(s) [${stated.join(', ')}] but PR #${opts.pr}'s current head has ${state.findings.length} open Copilot finding(s); derive the reason from the PR (blocked --pr) instead of recalling earlier rounds - nothing was posted`);
+      }
+      question = reason + derivedFindingsBlock(opts.pr, headSha, state);
+    } else {
+      // Fail closed (#860 acceptance 3): the count is unknown, the caveat says so.
+      question = reason + underivedFindingsBlock(opts.pr);
+    }
+  }
   // Label FIRST so a crash between the two writes still shows the blocked state; the comment is
   // the second write. The comment MUST land before the claim is released - otherwise the issue is
   // unlabeled AND questionless (a silent stall). A failed comment fails hard; a rerun retries the
@@ -215,7 +317,7 @@ export async function blockIssue(io: NextIo, opts: { repo: string; issue: number
   // already present); the post-state is always "labeled" when this function returns.
   const newlyLabeled = await io.postLabel(`/repos/${opts.repo}/issues/${opts.issue}/labels`, { labels: [L_BLOCKED] });
   const res = await io.post(`/repos/${opts.repo}/issues/${opts.issue}/comments`, {
-    body: `The nightly stopped on this issue instead of asking (nightly Runs never ask, §4.4).\n\n**Blocking question:** ${reason}\n\nThe issue is labeled \`${L_BLOCKED}\` for a human to answer or relabel; the \`${L_IN_PROGRESS}\` claim is being released right after this comment.`,
+    body: `The nightly stopped on this issue instead of asking (nightly Runs never ask, §4.4).\n\n**Blocking question:** ${question}\n\nThe issue is labeled \`${L_BLOCKED}\` for a human to answer or relabel; the \`${L_IN_PROGRESS}\` claim is being released right after this comment.`,
   });
   if (res.status < 200 || res.status >= 300) {
     throw new Error(`blocked exit failed: the question comment was not accepted (POST returned ${res.status}); the claim stays so the next night retries`);
@@ -235,7 +337,7 @@ export async function blockIssue(io: NextIo, opts: { repo: string; issue: number
       const issueBody = issueRes.body as { user?: { login?: string }; body?: string } | null;
       if (issueBody?.user?.login === NIGHTLY_AUTHOR && typeof issueBody.body === 'string') {
         const stripped = issueBody.body.replace(/\n?<!-- nightly:blocking-question[\s\S]*?-->$/, '');
-        const marker = `\n\n<!-- nightly:blocking-question\n${reason}\n-->`;
+        const marker = `\n\n<!-- nightly:blocking-question\n${question}\n-->`;
         await io.patch(`/repos/${opts.repo}/issues/${opts.issue}`, { body: stripped + marker });
       }
     }
@@ -496,8 +598,13 @@ if (isMain) {
     if (cmd === 'blocked') {
       const issue = Number(flag('--issue'));
       const reason = flag('--reason') ?? '';
-      if (!repo || !Number.isInteger(issue) || issue <= 0) throw new Error('usage: next.ts blocked --repo <owner/name> --issue <n> --reason "<question>"');
-      return await blockIssue(realIo(process.env), { repo, issue, reason }, process.env);
+      // --pr turns a review-cap hand-off (#860) into a DERIVED one: the current head's open
+      // Copilot findings are fetched and appended to the reason; a mismatched stated count is
+      // refused before anything is written.
+      const prRaw = flag('--pr');
+      const pr = prRaw === undefined ? undefined : Number(prRaw);
+      if (!repo || !Number.isInteger(issue) || issue <= 0) throw new Error('usage: next.ts blocked --repo <owner/name> --issue <n> --reason "<question>" [--pr <n>]');
+      return await blockIssue(realIo(process.env), { repo, issue, reason, pr }, process.env);
     }
     throw new Error('usage: next.ts run|finish|blocked|propose --repo <owner/name> [--dry-run] [--issue <n>] [--reason "..."] [--source <doc#anchor>] [--title "..."] [--body-file <path>]');
   })();
