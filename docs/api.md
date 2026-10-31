@@ -190,9 +190,11 @@ request to one is a `404` ([workflows.md](crew/workflows.md) section 14).
 Listing and inspecting a template is host configuration, so every
 authenticated caller may read it (the `/api/presets` rule).
 `GET /api/workflows` returns `{ workflows: [...] }` with `id`, `version`,
-`description`, `mode` (always `advisory` in this release), `trust`,
-`contentHash`, `stageCount`, `maxStages` and the template-relative source
-path. Adding `?includeInvalid=1` requires an admin token and appends
+`enabled` (always `true`: this release has no disable flag, and a listed
+template is one the host will run), `description`, `mode` (always `advisory`
+in this release), `trust`, `contentHash`, `stageCount`, `maxStages` and the
+template-relative source path. Fleet's availability reader needs `enabled` to
+accept an entry at all ([fleet-bots-design.md](fleet-bots-design.md) §5.1). Adding `?includeInvalid=1` requires an admin token and appends
 `invalid: [...]` with the per-template validation findings — an invalid
 template is fixed by editing files on the host, which is an operator
 concern. Invalid templates never appear in the valid list.

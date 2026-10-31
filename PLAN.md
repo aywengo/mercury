@@ -67,6 +67,7 @@ Record: [`docs/nightly-self-development.md`](docs/nightly-self-development.md)
 | #1024 | nightly: flag Runs that end with unpushed commits or without finish/blocked; report the loaded skill version | done | #1025 |
 | #1026 | nightly: #1024 follow-ups from the #1025 round-2 review (scan budget, host-wide unpushed section, ledger temp race, doc drift) | open | — |
 | #1001 | nightly: a claim whose Run ended with no PR and no comment is never released; rung 2 claims work with no ready signal | done | #1009 |
+| #1086 | e2e: the harness never imports product code -- fleetBots.test.ts imports test/helpers.ts | untracked | — |
 
 ## Dispatcher bots
 
@@ -183,7 +184,8 @@ Record: [`docs/fleet-bots-design.md`](docs/fleet-bots-design.md)
 | #971 | Fleet: owner-scoped, paged `GET /fleet/runs` (FB2a) | done | #982 |
 | #972 | Fleet: availability-aware routing filter (FB1) | done | #1002 |
 | #973 | Bots: `FleetSchedulerClient` and `api.via: "fleet"` (FB2b) | done | #1016 |
-| #974 | End to end: a bot on host A dispatches through Fleet to host B (FB3) | open | — |
+| #974 | End to end: a bot on host A dispatches through Fleet to host B (FB3) | done | #1081 |
+| #1080 | `GET /api/workflows` omits `enabled`, so Fleet refuses every workflow Run on every host | done | #1081 |
 
 ## Fleet tenancy
 

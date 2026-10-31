@@ -30,6 +30,12 @@ function listEntry(w: LoadedWorkflow) {
   return {
     id: w.id,
     version: w.version,
+    // Fleet's availability reader requires this field on every entry it accepts, for presets and
+    // workflows alike (fleet-bots-design.md §5.1: "the same fields for every template"). It was
+    // missing here, so Fleet read every template as `enabled: false` and refused to place any
+    // workflow Run on any host (#974's E2E is what surfaced it). Templates have no disable flag in
+    // this release: a template this endpoint lists is one the host will run.
+    enabled: true,
     description: w.description,
     mode: w.mode,
     trust: w.trust,

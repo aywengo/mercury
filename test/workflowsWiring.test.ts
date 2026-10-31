@@ -69,8 +69,13 @@ test('a running host serves the builtin workflow templates (#1078)', async () =>
   await withServer({}, async (base) => {
     const listed = await get(base, '/api/workflows');
     assert.equal(listed.status, 200, 'GET /api/workflows must not 404 on a host that ships workflows');
-    const ids = ((listed.body as { workflows?: { id: string }[] }).workflows ?? []).map((w) => w.id);
+    const entries = (listed.body as { workflows?: { id: string; enabled?: boolean }[] }).workflows ?? [];
+    const ids = entries.map((w) => w.id);
     assert.ok(ids.includes('plan-implement-review'), `expected the builtin template, got ${JSON.stringify(ids)}`);
+    // Fleet's availability reader accepts an entry only when `enabled` is true (fleet-bots-design.md
+    // §5.1). Omitting it here made every template read as disabled, so no workflow Run could be placed
+    // on any host (#974's E2E is what found it).
+    assert.equal(entries[0]?.enabled, true, 'the list entry must carry enabled:true for Fleet to route to it');
     const one = await get(base, '/api/workflows/plan-implement-review');
     assert.equal(one.status, 200);
   });
