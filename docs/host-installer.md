@@ -63,9 +63,69 @@ Harness scope for v1 is whatever has a shipped adapter in `src/adapters/` at the
 
 Each milestone is one issue and one PR (issue-fix-loop). A milestone is done when its gate holds, not when its code merges.
 
-The four "⚠️ implemented, gate open" milestones (M1, M3, M4, M6) are verification work with no
-scheduled run; the gate-closure issue set is drafted as proposal #929 (nightly rung 4,
-2026-10-10) and awaits an operator's `nightly:ready`.
+M1, M3 and M4 closed their gates on 2026-10-24 with the fresh-host run recorded in §2.1 (#929).
+M6's checksum half is verified by the same run; its signature half is deliberately dropped (no
+signing key exists) and its reader gate is the one item still open, because it needs a person who
+has not worked on the installer.
+
+## 2.1 The fresh-host verification run (2026-10-24, #929)
+
+One run, recorded because the gates above are claims until someone executes them.
+
+**Host.** A disposable Debian 13 (`debian:stable`) container with systemd as PID 1, a non-root user
+`ops` (the installer refuses root), Node 22.23.4 installed from the official tarball, and
+`prime-agent` 0.10.1 from its own installer — the harness prerequisite the wizard checks for. Nothing
+about Mercury was pre-installed or pre-configured.
+
+**The documented path, in order.**
+
+```
+curl -fsSL https://github.com/aywengo/mercury/releases/download/host-v0.2.7/install.sh -o install.sh
+sha256sum install.sh
+# 2e0e7c31d7db9be41431c966b20cac84434817f9a686448e7b9d1b6efc5acdb5 — the value in the release notes
+bash install.sh --version 0.2.7 --yes --non-interactive
+mercury host setup --non-interactive --answers answers.json --yes   # bindHost 0.0.0.0
+loginctl enable-linger ops
+mercury host service install
+```
+
+**Observed.**
+
+| Check | Result |
+| --- | --- |
+| checksum matches the release notes | yes, byte for byte |
+| `install.sh --dry-run` prints the action list and touches nothing | yes |
+| package installed to `~/.local`, version `mercury-host 0.2.7` | yes |
+| `host setup` writes `mercury.env` 0600 and finds the harness | yes (`harnesses: primeagent`) |
+| re-running setup keeps the existing token | yes (`unchanged (already registered on the Fleet side)`) |
+| `host service install` writes and enables both services | yes (`mercury.service` and `mercury-worker.service`, both `active`) |
+| `GET /healthz` | `{"product":"host","version":"0.2.7","api":1}` |
+| `host doctor` | `healthz: PASS`, `healthz (bind 0.0.0.0, dialed …): PASS`, `agent credentials: PASS`, `smoke primeagent: PASS — primeagent smoke run run_53301d9511504a0e completed` |
+| Fleet can reach the host | `fleet hosts add verify-host --url http://127.0.0.1:31000 --credential verify-host` → `added verify-host (Mercury 0.2.7, api 1)` |
+| Fleet can drive a Run | `POST /fleet/runs` → `fr_1f414ed21cd24b3789286f45db312f35`, `childRunId run_3dea05bce01e4762`, status `COMPLETED` |
+| placement is explainable | a Run for an undeclared local path was refused with `verify-host: does not declare … among its local paths [none declared]` |
+
+**What the run found.** Three defects, all fixed before this record was written, all invisible to
+the test suite because they only appear on a host that has never run Mercury:
+
+1. **#1071 — no worker service.** `host service install` wrote one unit running `mercury server`, and
+   the `MERCURY_EMBEDDED_WORKER=true` it set is honoured only by `dev`. The smoke Run stayed `QUEUED`
+   until it timed out. Fixed in #1072 (0.2.6): install writes and enables a worker service beside the
+   host service.
+2. **#1074 — no PATH for the harness.** A systemd user unit (and a launchd agent) does not read a
+   shell profile, so `~/.local/bin`, where `prime-agent` installs itself, was invisible: every Run
+   failed with `Agent exited with code 127`. Fixed in #1075 (0.2.7).
+3. **#1074 — no data directory.** `host setup` prints the data dir without creating it, and the
+   documented `npm install -g` path had nothing to create it as a side effect (the `curl | bash`
+   installer does, by writing its log there), so both services crash-looped on
+   `unable to open database file`. Fixed in #1075 (0.2.7).
+
+The gate holds on 0.2.7 and only on 0.2.7 or later. That is the point of recording the version.
+
+**Still open.** M6's reader gate — *"someone who has not worked on the installer follows the docs
+only and reaches the M4 state"* — has not been run, because everyone who has worked on this page
+knows where the bodies are buried. It needs a person and a spare hour, and it is the only claim in
+this document that this run does not establish.
 
 ### M0 — Design doc
 
@@ -73,7 +133,7 @@ This document. Done, apart from recording per-harness minimum versions from each
 
 Gate: doc merged; every question in section 3 has an answer or a written reason to defer. Met 2026-09-16.
 
-### M1 — Bootstrap skeleton — ⚠️ implemented, gate open (Docker matrix runs in CI since #649 §5, and #666's `mercury host setup` hand-off is in; gate verification = the same fresh-VM run as M4, plus M6's checksum publishing)
+### M1 — Bootstrap skeleton — ✅ done (gate verified by the 2026-10-24 fresh-host run, §2.1: the documented `curl | bash` install reached a running host on 0.2.7, and the published checksum matched)
 
 `install.sh`:
 
@@ -110,7 +170,7 @@ Gate: probe results agree with the adapters' own real-binary observations (the s
 - `fake` and declarative local agents are not host harnesses and never appear.
 - Tests: `test/hostProbe.test.ts` (11 tests) — missing binary → `missing`, downgraded → `too-old`, floor satisfied → `ok`, no floor → `unknown`, env cmd override, no-config host, unknown flag rejected (first and after `--json`).
 
-### M3 — Configuration wizard — ⚠️ implemented, gate open (all code is in: #649 §1–3, §6 via #658–#663, #647's probe integration, #665's bind-address prompt; the gate is verified by M4's fresh-VM run)
+### M3 — Configuration wizard — ✅ done (gate verified by the same run, §2.1: `host setup` wrote `mercury.env` 0600, found the installed harness, kept the token on a re-run, and the host it configured answered `/healthz`)
 
 Prompts: host name, data dir, workspace dir, GC retention, Atlas on/off, per-harness enable, and — default **no**, never a silent default (#831) — the opt-in Laya sidecar (docs/laya-integration-design.md §5.3): a Python ≥ 3.10 gate (uv-managed preferred; the macOS system 3.9.6 is refused with the reason), a user-scoped venv under the data dir with the pinned `laya[serve]` version, a generated `LAYA_API_KEY` in its own 0600 `laya-credentials.json` (a re-run preserves an existing key; the bot credentials file is never touched, so `laya` stays an ordinary bot alias), `MERCURY_LAYA_URL=http://127.0.0.1:8302` in `mercury.env`, and a user-scoped launchd/systemd unit bound to `127.0.0.1` with `LAYA_PRELOAD=1`, `LAYA_MODELS=english`; finish by running the #830 doctor line. Opt-out installs nothing and writes no keys. Each answer maps to a documented `MERCURY_*` variable that the host's config loader reads. Writes `mercury.env` atomically (temp file, validate, rename, 0600), prints a redacted summary. There is no Fleet prompt: Fleet is pull, not push (issue #645, decision 6).
 
@@ -124,18 +184,19 @@ Gate: every `mercury.env` value matches the safe charset `[A-Za-z0-9._:/@+=,-]` 
 - Interactive and `--non-interactive` share one code path: answers → validate → render → write. The M3 gate test feeds the same answers through both and asserts byte-identical `mercury.env`.
 - Atomic write: temp file in the target dir, rename, chmod 0600. Nothing is written until every answer validates (invalid answers exit 1 with the reasons).
 - Secrets never printed in output: env / answers file / interactive prompt; the redacted summary shows presence and length only. `MERCURY_ADMIN_TOKEN` is generated by the wizard (32 random bytes) unless supplied; it is printed exactly once, in a marked "Register on the Fleet side" block at the end (#648, decision 6), and a `--yes` re-run preserves the file's existing token instead of rotating it. Since #649 §1 the token prompts use muted-echo input (typed characters are not written to the terminal, and an existing token's default is shown as `<set, N chars>`); the other answers use the normal readline prompt. A secret remains protected by the 0600 env file and the redacted summary. A rewrite also preserves every hand-set variable the wizard does not own (`MERCURY_PORT`, `MERCURY_LOG_LEVEL`, TLS variables, sandbox/runtime settings — #673): each is validated against the safe charset on the way through, carried into the new file verbatim, and named (never valued) in the redacted summary.
+- Optional dispatcher-bot step (B4, #915; [`bots.md`](bots.md)): `botEnabled`/`botAlias`/`botHarness`/`botPosture` write `<alias>.json`, the alias's `bot-credentials.json` entry and its `MERCURY_API_TOKENS` entry in the same run, so the two token copies cannot drift at creation. An existing config is kept, an existing token is reused, and two copies that already disagree are refused by name. The observer and brain postures are refused (B2/B3) after printing the §8.5 blast-radius sentence. `--dry-run` prints the plan and writes no bot file. Tests: `test/botSetup.test.ts`.
 - Tests: `test/hostSetup.test.ts` — flags, per-field validation, Atlas-requires trio, render mapping, doc-name pin, the byte-identical gate, 0600 mode, invalid-answer rejection, unknown flag, `--dry-run` touches nothing, redaction, harness filtering. The count is not quoted here — the #580 policy (a count nobody runs is wrong within a few changes), enforced for the documents it reads by `test/testCountClaims.test.ts`, which does not yet read this page.
 
-### M4 — Service and verification — ⚠️ implemented, gate open (#648's code fixes and #665's bind-address check are in; the fresh-VM run that meets the gate is pending)
+### M4 — Service and verification — ✅ done (gate verified by the same run, §2.1: both services enabled and active, `host doctor` all PASS including a completed smoke Run, Fleet registered the host and drove a Run to `COMPLETED`)
 
 - launchd agent (`~/Library/LaunchAgents`) on macOS, systemd user unit (`~/.config/systemd/user`, with a `loginctl enable-linger` hint) on Linux, generated and enabled, both loading `mercury.env` the same way the units in `deploy/` do.
-- `mercury host doctor`: healthz version check, one smoke Run per enabled harness using the real binary, and — when `MERCURY_LAYA_URL` is set (#830) — the Laya probe line. (The first build also probed a "Fleet URL" from the host; that check is gone with the pull model — issue #645 — because the host never contacts Fleet. Fleet-side registration is verified from Fleet.)
+- `mercury host doctor`: healthz version check, one smoke Run per enabled harness using the real binary, — when `MERCURY_LAYA_URL` is set (#830) — the Laya probe line, and one line per configured dispatcher bot (B4, #915): config, both token copies, state-file writability and the bounded read-only status view. A defect is a named FAIL line and a non-zero exit. Tests: `test/botDoctor.test.ts`. (The first build also probed a "Fleet URL" from the host; that check is gone with the pull model — issue #645 — because the host never contacts Fleet. Fleet-side registration is verified from Fleet.)
 
 Gate: fresh VM → running host that Fleet can reach and drive, with at least one harness Run completed, with no manual steps beyond obtaining the token and running the installer.
 
 **As built** (`src/host/service.ts` + `src/host/doctor.ts`, wired as `mercury host service install|status|uninstall` and `mercury host doctor [--json]` before `loadConfig()`):
 
-- **Service**: deterministic unit text (same inputs → same bytes, test-pinned). Since #650 the macOS load is idempotent (`launchctl print` → `bootout` if loaded → `bootstrap gui/$UID`), so re-running `host service install` exits 0. macOS launchd plist `com.mercury.host.plist` runs a wrapper script (`${XDG_STATE_HOME:-~/.local/state}/mercury/run-host.sh`) that sources `mercury.env` (launchd has no EnvironmentFile) and execs the resolved `mercury` binary with `MERCURY_EMBEDDED_WORKER=true`; logs to `${XDG_STATE_HOME:-~/.local/state}/mercury/host.log`. Linux systemd user unit `~/.config/systemd/user/mercury.service` with an absolute `EnvironmentFile=` path (`${XDG_CONFIG_HOME:-~/.config}/mercury/mercury.env` — absolute is safer than `%h/...` given XDG_CONFIG_HOME handling, issue #650), `ExecStart=<resolved mercury> server`, enabled via `systemctl --user enable --now` plus a `loginctl enable-linger` hint. `--dry-run` prints the unit and writes nothing; install without `mercury.env` fails with a pointer to `host setup`.
+- **Service**: deterministic unit text (same inputs → same bytes, test-pinned). Since #650 the macOS load is idempotent (`launchctl print` → `bootout` if loaded → `bootstrap gui/$UID`), so re-running `host service install` exits 0. macOS launchd agents `com.mercury.host.plist` and `com.mercury.worker.plist` run wrapper scripts (`${XDG_STATE_HOME:-~/.local/state}/mercury/run-host.sh`, `run-worker.sh`) that source `mercury.env` (launchd has no EnvironmentFile) and exec the resolved `mercury` binary with `server` and `worker` respectively; they log to `host.log` and `worker.log` in the same directory. Linux systemd user units `~/.config/systemd/user/mercury.service` and `mercury-worker.service` with an absolute `EnvironmentFile=` path (`${XDG_CONFIG_HOME:-~/.config}/mercury/mercury.env` — absolute is safer than `%h/...` given XDG_CONFIG_HOME handling, issue #650), `ExecStart=<resolved mercury> server` and `... worker`, both enabled via `systemctl --user enable --now` plus a `loginctl enable-linger` hint, and both carrying an explicit `Environment=PATH=` (the resolved binary's directory, `%h/.local/bin`, then the system defaults) because neither systemd user units nor launchd agents read a shell profile and the harness installers put their launchers in `~/.local/bin` (issue #1074). Two units, not one: `mercury server` never claims Runs (`MERCURY_EMBEDDED_WORKER` is honoured only for `dev`), so a host with only the host unit accepts Runs and executes none — the #929 fresh-host run found exactly that, issue #1071. `--dry-run` prints the unit and writes nothing; install without `mercury.env` fails with a pointer to `host setup`.
 - **Doctor**: reads `mercury.env` itself (works on a host whose service is the thing being diagnosed). healthz check against `http://127.0.0.1:${MERCURY_PORT:-3000}/healthz`; one smoke Run per enabled harness via `POST /api/runs` (needs `MERCURY_ADMIN_TOKEN` or `MERCURY_API_TOKENS`; without one the smoke section says so instead of crashing — and since #648 the all-skipped case fails the doctor). Since #654 an explicit empty `MERCURY_HARNESSES` also fails the doctor ("nothing to smoke-verify") unless `--allow-no-harnesses` says the host runs none; an unset variable still means the default list. The first build's Fleet-reachability check was removed with the pull model (issue #645). Since #665 a second healthz verifies the address Fleet will actually dial when `MERCURY_BIND_HOST` is a named address; since #674 a `0.0.0.0` bind is not skipped — the host's own first non-internal IPv4 (`os.networkInterfaces()`) is dialed and reported (`healthz (bind 0.0.0.0, dialed <ip>): PASS/FAIL`), with an explicit `SKIP — no non-internal IPv4 …` note on a loopback-only host. Every check is bounded; `--json` emits the same facts as the human report (`noHarnesses` since #654). Since #830, when `MERCURY_LAYA_URL` is set the doctor adds a `laya:` line — one fixed probe question through the real client (auth against the `laya` entry in `bot-credentials.json`, the configured `MERCURY_LAYA_TIMEOUT_MS` deadline, validation included), reporting the checkpoint and one-question latency; a configured-but-failing sidecar fails the doctor; unset prints no line at all (absence is the default, not a warning).
 - Tests: `test/hostService.test.ts` (9) + `test/hostDoctor.test.ts` (32) — deterministic units, path resolution, dry-run writes nothing, no-env failure, unknown subcommand/flag, healthz/Fleet/smoke against a mock HTTP server, env-file parsing, the #665/#674 bind-address second check (injectable interface lists; no LAN socket in tests).
 
@@ -155,7 +216,7 @@ Gate: install vN → upgrade vN+1 → uninstall leaves nothing but the opted-in 
 - **Re-run guard** — `host setup` on a configured host (mercury.env exists) shows the current state and refuses to overwrite unless `--yes` is passed (interactive or `--non-interactive`). `--dry-run` on a configured host warns it would overwrite.
 - Tests: `test/hostLifecycle.test.ts` (16) + the new re-run-guard test in `test/hostSetup.test.ts`. Full suite 1227/1227 green.
 
-### M6 — Release hardening — ⚠️ implemented, gate open (checksum/signing pending, plus the M4 fresh-VM run that exercises the release artifacts; #649 §4's honest dry-run and §5's CI matrix are in)
+### M6 — Release hardening — ⚠️ partially done (checksum published and verified, §2.1; the signature half is dropped, because no signing key exists and a gate that waits forever is a claim; the reader gate is the one item still open)
 
 - `bats` test suite for `install.sh`.
 - CI matrix on every PR touching the installer or `mercury host` subcommands, including the `MERCURY_*`-name-vs-`docs/configuration.md` check. Since #649 §5 the matrix runs the bats suite and the host subcommand tests on Ubuntu, Debian (container), Fedora (container) and macOS, plus `mercury host service install --dry-run` on the macOS runner (launchd; nothing written).
@@ -163,6 +224,14 @@ Gate: install vN → upgrade vN+1 → uninstall leaves nothing but the opted-in 
 - Docs page with both one-liners and a `curl | bash` safety note (download, inspect, run).
 
 Gate: someone who has not worked on the installer follows the docs only and reaches the M4 state.
+
+**Where the two halves stand (2026-10-24, §2.1).** The checksum half is done: every host release
+publishes `install.sh` and its sha256 in the notes, and the fresh-host run verified the published
+value byte for byte. The **signature half is dropped**, not pending: no signing key exists, and a
+gate that says "if a signing key exists by then" stays open forever by construction — the exact state
+this section exists to end. If a key ever appears, the gate comes back with it. The **reader gate is
+open**: it needs a person who has not worked on the installer, and nobody who has can stand in for
+them.
 
 **As built**:
 

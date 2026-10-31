@@ -8,6 +8,60 @@ and this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.7] - 2026-10-24
+
+A patch release that lets a fresh host actually execute a Run. 0.2.6 made the installer write the
+worker service; on a clean host the worker then found no harness, because neither a systemd user
+unit nor a launchd agent inherits `~/.local/bin`, and the npm install path had no data directory to
+open. Both are fixed here.
+
+### Fixed
+
+- **The service units set `PATH`, so the harness is found (#1074, PR #1075).** Neither a systemd
+  user unit nor a launchd agent reads a shell profile, so neither inherited `~/.local/bin` — where
+  the npm installer puts `mercury` and where a harness installer puts `prime-agent`. The worker
+  spawned the agent, got ENOENT, and every Run failed with `Agent exited with code 127`. Both units
+  now carry `Environment=PATH=<bin dir>:/usr/local/bin:/usr/bin:/bin`, and both launchd wrappers
+  export the same prefix. On a fresh Debian 13 container this turned
+  `smoke primeagent: FAIL - primeagent smoke run run_3866d473dd7441b0 FAILED` into
+  `smoke primeagent: PASS - primeagent smoke run run_c86b774630de4f1f completed`.
+- **Opening the database creates its directory (#1074, PR #1075).** `host setup` prints the data
+  dir without creating it, and `mercury server`/`worker` died on `unable to open database file`,
+  systemd restarting them forever. The `curl | bash` installer hid this by writing its log into that
+  directory; the documented `npm install -g` path had no such side effect. `openDatabase` now
+  creates the parent directory.
+
+## [0.2.6] - 2026-10-24
+
+A patch release that makes a fresh host actually run. `mercury host service install` wrote one
+service, running `mercury server`; the server never claims Runs, so a host installed from the
+installer accepted Runs from Fleet and executed none. Install now writes and enables a worker
+service beside the host service on both platforms. The bots also gained `api.via: "fleet"`: a bot
+whose config says so dispatches through Fleet instead of its own host, with single-flight and
+idempotency preserved.
+
+### Fixed
+
+- **`mercury host service install` writes the worker service too (#1071, PR #1072).** The
+  generated host unit carried `MERCURY_EMBEDDED_WORKER=true`, which `src/cli.ts` honours only for
+  `dev`; `mercury server` therefore never claimed a Run. The #929 fresh-host run on 0.2.5 showed
+  it: `host doctor`'s smoke Run stayed `QUEUED` and timed out after 120 s, and a hand-started
+  `mercury worker` completed both parked Runs at once. Install now writes `mercury-worker.service`
+  (systemd, `TimeoutStopSec=45`) and `com.mercury.worker` (launchd, its own wrapper and log)
+  beside the host service, enables both, and `host service status`/`uninstall` cover both. The
+  misleading `MERCURY_EMBEDDED_WORKER` line is gone from the generated host unit.
+
+### Added
+
+- **Bots can dispatch through Fleet: `api.via: "fleet"` (FB2b, #973, PR #1016).** With
+  `api.via: "fleet"` the scheduler's two calls go to `POST /fleet/runs` and
+  `GET /fleet/runs?owner=self` instead of the host, with the bot's derived key as Fleet's
+  `Idempotency-Key`. Fleet keeps placement; the bot never decides where work runs. `fleet` needs a
+  `fleet` token beside `api` in `bot-credentials.json`, and `host bot validate` refuses the config
+  without it, naming the alias. A binding Fleet cannot resolve (`UNKNOWN`) counts as non-terminal,
+  so it blocks the next fire exactly as a parked `NEEDS_INPUT` Run does. See
+  `docs/fleet-bots-design.md` §4 option A and `docs/dispatcher-bot-design.md` §5.2.
+
 ## [0.2.5] - 2026-10-24
 
 A patch release about identity. `mercury host doctor` reports whether the worker's OS user holds

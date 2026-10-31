@@ -47,6 +47,17 @@ import { readLayaCredentials } from './layaCredentials.ts';
 import { DEFAULT_PYTHON_CANDIDATES, detectPython, ensureLayaCredentials, isLaunchdNotLoaded, LAYA_DEFAULT_PORT, LAYA_SERVE_PIN, layaStepActions, planLayaSidecar, renderLayaLaunchdPlist, renderLayaSystemdUnit, type LayaPlan, type RunFn } from './layaSidecar.ts';
 import { harnessSpecs, probeHarness, type HarnessProbeResult } from './probe.ts';
 import { isWizardManagedLayaDefault, validateLayaBaseUrl } from '../laya/layaUrl.ts';
+import { BOT_ALIAS_RE, botConfigPath } from './bots/config.ts';
+import {
+  BLAST_RADIUS_SENTENCE,
+  BOT_POSTURES,
+  DEFAULT_BOT_ALIAS,
+  botProvisionSummary,
+  planBotProvision,
+  writeBotProvision,
+  type BotPosture,
+  type BotProvisionPlan,
+} from './bots/provision.ts';
 
 /** The wizard's answers, before validation. Every field maps to a MERCURY_* variable. */
 export interface HostSetupAnswers {
@@ -76,6 +87,17 @@ export interface HostSetupAnswers {
   harnesses: string[];
   /** Opt-in Laya sidecar (#831, Laya design §5.3). Default FALSE — opt-out writes nothing. */
   layaEnabled: boolean;
+  /**
+   * The optional dispatcher-bot step (§11, B4). These do NOT map to a MERCURY_* variable: the bot
+   * reads `<alias>.json` plus `bot-credentials.json`, and its token reaches the server through
+   * `MERCURY_API_TOKENS`, which is rendered as a preserved variable in the same write.
+   */
+  botEnabled: boolean;
+  botAlias: string;
+  /** The harness a starter task names (`agent`); must be one of the enabled `harnesses`. */
+  botHarness: string;
+  /** `scheduler` today; `observer`/`brain` land with B2/B3 and are refused. */
+  botPosture: BotPosture;
   /**
    * The MERCURY_LAYA_URL to write. '' = wizard-managed local install (the 127.0.0.1:8302
    * default). A NON-EMPTY value is an EXTERNALLY configured endpoint preserved from the
@@ -181,6 +203,30 @@ export function validateAnswer(key: keyof HostSetupAnswers, value: unknown): str
       return typeof value === 'boolean' ? null : 'atlasEnabled must be a boolean';
     case 'layaEnabled':
       return typeof value === 'boolean' ? null : 'layaEnabled must be a boolean';
+    case 'botEnabled':
+      return typeof value === 'boolean' ? null : 'botEnabled must be a boolean';
+    case 'botAlias': {
+      if (typeof value !== 'string') return 'bot alias must be a string';
+      return BOT_ALIAS_RE.test(value.trim()) ? null : `bot alias must match ${BOT_ALIAS_RE.source}`;
+    }
+    case 'botHarness': {
+      if (typeof value !== 'string' || value.trim() === '') return 'bot harness must be a non-empty string';
+      const h = value.trim();
+      return (KNOWN_HARNESSES as readonly string[]).includes(h)
+        ? null
+        : `unknown harness '${h}'; known: ${KNOWN_HARNESSES.join(', ')}`;
+    }
+    case 'botPosture': {
+      if (typeof value !== 'string') return 'bot posture must be a string';
+      const posture = value.trim();
+      if (!(BOT_POSTURES as readonly string[]).includes(posture)) {
+        return `bot posture must be one of ${BOT_POSTURES.join(', ')}`;
+      }
+      if (posture !== 'scheduler') {
+        return `the ${posture} posture lands with B2/B3 (#907–#909, #912) and cannot be written yet. ${BLAST_RADIUS_SENTENCE}`;
+      }
+      return null;
+    }
     case 'layaUrl': {
       // The shape contract lives in ONE validator (src/laya/layaUrl.ts) shared with loadConfig
       // and the doctor (Copilot #840 r34): the wizard cannot be the only gate when hand-written
@@ -250,8 +296,21 @@ export function validateAnswers(
 ): string[] {
   const errors: string[] = [];
   for (const key of Object.keys(a) as (keyof HostSetupAnswers)[]) {
+    // Bot answers are ignored when the step is off: an operator who skipped the step must not be
+    // failed by an empty alias in an answers file that copied the whole schema.
+    if (!a.botEnabled && (key === 'botAlias' || key === 'botHarness' || key === 'botPosture')) continue;
     const err = validateAnswer(key, a[key]);
     if (err) errors.push(`${key}: ${err}`);
+  }
+  if (a.botEnabled && !errors.some((e) => e.startsWith('botHarness:'))) {
+    // A starter task naming a harness the host does not enable would dispatch to an agent the
+    // operator just turned off. A non-array `harnesses` is already an error above; do not crash
+    // on it here (an answers file is untrusted input).
+    const harness = typeof a.botHarness === 'string' ? a.botHarness.trim() : '';
+    const enabled = Array.isArray(a.harnesses) ? a.harnesses : [];
+    if (!enabled.includes(harness)) {
+      errors.push(`botHarness: '${harness}' is not enabled in harnesses (${enabled.join(', ')})`);
+    }
   }
   // The sidecar's unit embeds ABSOLUTE paths (systemd ExecStart rejects relative
   // executables, Copilot #840 r25): a WIZARD-MANAGED local install requires an absolute data
@@ -337,8 +396,9 @@ export function renderEnv(a: HostSetupAnswers, preserve: Record<string, string> 
   return lines.sort().join('\n') + '\n';
 }
 
-/** Lines whose VALUE is a credential — shown redacted in diffs. */
-const REDACTED_KEYS = new Set(['MERCURY_ADMIN_TOKEN', 'MERCURY_ATLAS_TOKEN']);
+/** Lines whose VALUE is a credential — shown redacted in diffs. `MERCURY_API_TOKENS` is a
+ *  list of bearer tokens, including every bot's, so its value never reaches a terminal or log. */
+const REDACTED_KEYS = new Set(['MERCURY_ADMIN_TOKEN', 'MERCURY_ATLAS_TOKEN', 'MERCURY_API_TOKENS']);
 
 /**
  * A compact line-level diff between the current and proposed mercury.env content, with
@@ -412,6 +472,7 @@ export function redactedSummary(a: HostSetupAnswers, preservedVarNames: string[]
     `admin token: ${admin ? `<set, ${admin.length} chars>` : '<unset — will be generated>'}`,
     `Atlas: ${atlasLine}`,
     `harnesses: ${a.harnesses.join(', ')}`,
+    ...(a.botEnabled ? [`bot: ${a.botAlias.trim()} (${a.botPosture.trim()})`] : []),
     ...(preservedVarNames.length > 0
       ? [`preserved (hand-set): ${preservedVarNames.join(', ')}`]
       : []),
@@ -455,6 +516,11 @@ export function defaultAnswers(env: NodeJS.ProcessEnv = process.env): HostSetupA
     .split(',')
     .map((h) => h.trim())
     .filter(Boolean);
+  const harnesses = detected.filter((h) => (KNOWN_HARNESSES as readonly string[]).includes(h));
+  // The bots step is opt-in on a fresh host and stays on for a re-run once its config exists
+  // (same continuity rule as the admin token and the sidecar): pressing enter must not disable a
+  // bot the operator already set up.
+  const botAlias = DEFAULT_BOT_ALIAS;
   return {
     hostName: env.MERCURY_ATLAS_HOST_ID?.trim() || hostname(),
     dataDir: env.MERCURY_DB ? dirname(env.MERCURY_DB) : join(homedir(), '.local', 'state', 'mercury'),
@@ -471,7 +537,7 @@ export function defaultAnswers(env: NodeJS.ProcessEnv = process.env): HostSetupA
     // the written file) unless the operator supplies a new one — an enter-press on the
     // prompt must not silently un-expose the API.
     bindHost: env.MERCURY_BIND_HOST?.trim() || existingVar('MERCURY_BIND_HOST', env),
-    harnesses: detected.filter((h) => (KNOWN_HARNESSES as readonly string[]).includes(h)),
+    harnesses,
     // Opt-in continuity (#831): a re-run keeps the sidecar enabled when the host already has
     // MERCURY_LAYA_URL — in the process env OR the written mercury.env (bindHost solves the
     // same problem with existingVar). A fresh host defaults to NO: the sidecar is never a
@@ -488,6 +554,10 @@ export function defaultAnswers(env: NodeJS.ProcessEnv = process.env): HostSetupA
     layaUrl: env.MERCURY_LAYA_URL !== undefined && env.MERCURY_LAYA_URL !== ''
       ? env.MERCURY_LAYA_URL
       : (existingVarRaw('MERCURY_LAYA_URL', env) || ''),
+    botEnabled: existsSync(botConfigPath(botAlias, env)),
+    botAlias,
+    botHarness: harnesses[0] ?? '',
+    botPosture: 'scheduler',
   };
 }
 
@@ -506,6 +576,10 @@ const ANSWERS_FILE_KEYS = [
   'atlasProject',
   'harnesses',
   'layaEnabled',
+  'botEnabled',
+  'botAlias',
+  'botHarness',
+  'botPosture',
 ] as const satisfies readonly (keyof HostSetupAnswers)[];
 
 /** Read answers from a JSON file. Unknown keys are REJECTED (issue #649 §2, decision 10):
@@ -567,6 +641,12 @@ export function readAnswersFile(path: string, env: NodeJS.ProcessEnv = process.e
     atlasProject: parsed.atlasProject ?? base.atlasProject,
     harnesses: parsed.harnesses ?? base.harnesses,
     layaEnabled: parsed.layaEnabled ?? base.layaEnabled,
+    botEnabled: parsed.botEnabled ?? base.botEnabled,
+    botAlias: parsed.botAlias ?? base.botAlias,
+    botHarness: parsed.botHarness ?? base.botHarness,
+    // A non-string posture passes through so validateAnswers reports the type error (same rule as
+    // layaUrl), rather than falling back to 'scheduler' and writing a bot the file did not ask for.
+    botPosture: parsed.botPosture ?? base.botPosture,
   };
 }
 
@@ -631,6 +711,18 @@ export async function promptAnswers(io: {
   // disable a configured sidecar (same continuity rule as the admin token/bind).
   const layaOn = (await q('Install the Laya sidecar? (yes/no; selection support, opt-in)', base.layaEnabled ? 'yes' : 'no')).toLowerCase();
   const layaEnabled = layaOn === 'yes' || layaOn === 'y';
+  // Optional dispatcher-bot step (§11, B4). Skipping it changes nothing; the posture question is
+  // answered by the same validator as an answers file, so the two entry paths cannot diverge.
+  const botOn = (await q('Set up a dispatcher bot? (yes/no; scheduler-only until B2/B3)', base.botEnabled ? 'yes' : 'no')).toLowerCase();
+  const botEnabled = botOn === 'yes' || botOn === 'y';
+  let botAlias = base.botAlias;
+  let botHarness = base.botHarness;
+  let botPosture = base.botPosture;
+  if (botEnabled) {
+    botAlias = await q('Bot alias', base.botAlias);
+    botHarness = await q('Bot harness (a starter task names it)', base.botHarness);
+    botPosture = (await q('Bot posture (scheduler/observer/brain)', base.botPosture)).toLowerCase() as BotPosture;
+  }
   return {
     hostName,
     layaUrl: base.layaUrl,
@@ -647,6 +739,10 @@ export async function promptAnswers(io: {
     atlasProject,
     harnesses,
     layaEnabled,
+    botEnabled,
+    botAlias,
+    botHarness,
+    botPosture,
   };
 }
 
@@ -856,12 +952,33 @@ export async function runHostSetup(
   const generatedToken = !answers.adminToken.trim();
   if (generatedToken) answers.adminToken = generateAdminToken();
 
+  // The optional dispatcher-bot step (§11, B4). Planned before anything is written, so a token
+  // disagreement is a named refusal rather than a half-provisioned bot. The server-side copy is
+  // rendered into MERCURY_API_TOKENS below, in the same write as mercury.env (§4.2: one step, so
+  // the two copies cannot drift at creation).
+  const existingVars = existsSync(envFilePath(env)) ? loadEnvFile(envFilePath(env)) : {};
+  let botPlan: BotProvisionPlan | undefined;
+  if (answers.botEnabled) {
+    try {
+      botPlan = planBotProvision({
+        alias: answers.botAlias.trim(),
+        harness: answers.botHarness.trim(),
+        posture: answers.botPosture,
+        env,
+        apiTokensRaw: existingVars.MERCURY_API_TOKENS ?? env.MERCURY_API_TOKENS,
+      });
+    } catch (e) {
+      io.err(`\nbot: ${(e as Error).message}\n`);
+      io.err('Nothing was written. Fix the bot token copies and re-run.\n');
+      return 1;
+    }
+  }
+
   // Operator-managed variables must survive a rewrite (#673, generalizing #668 round 6):
   // every existing key the wizard does not own (MERCURY_PORT, MERCURY_LOG_LEVEL, TLS vars,
   // sandbox/runtime settings — anything the host reads that the wizard never asks about)
   // is carried forward verbatim. A re-run that silently dropped MERCURY_PORT would restart
   // the host on the default port and make the hand-off print the wrong URL.
-  const existingVars = existsSync(envFilePath(env)) ? loadEnvFile(envFilePath(env)) : {};
   const wizardOwned = WIZARD_VARIABLES as readonly string[];
   // Empty-string values are preserved too: an operator may set a variable empty ON
   // PURPOSE to hold the host at a non-default (dropping it would silently re-enable the
@@ -869,13 +986,16 @@ export async function runHostSetup(
   const preservedEntries = Object.entries(existingVars)
     .filter(([k]) => !wizardOwned.includes(k))
     .filter((pair): pair is [string, string] => typeof pair[1] === 'string');
+  const preserved = Object.fromEntries(preservedEntries);
+  // The bot's server-side copy is written by this run, so it is not "preserved" from the old file;
+  // it replaces the old value while every other entry in it is kept (#677's rule).
+  if (botPlan) preserved.MERCURY_API_TOKENS = botPlan.apiTokensValue;
   // The file feeds systemd EnvironmentFile, bash source, and the doctor parser (#649 §3):
   // a preserved value outside the safe charset must fail the re-run, not sneak back in.
-  for (const [k, v] of preservedEntries) {
+  for (const [k, v] of Object.entries(preserved)) {
     const err = unsafeValueError(k, v);
     if (err) throw new Error(`${k}: ${err}`);
   }
-  const preserved = Object.fromEntries(preservedEntries);
   // Names only in the summary — some preserved values may be credentials (#673).
   const preservedNames = preservedEntries.map(([k]) => k).sort();
   const content = renderEnv(answers, preserved);
@@ -903,6 +1023,7 @@ export async function runHostSetup(
         io.out('\nLaya sidecar (opt-in) would:\n' + layaStepActions(plan, 'both').map((a) => `  - ${a}`).join('\n') + '\n');
       }
     }
+    if (botPlan) io.out('\n' + botProvisionSummary(botPlan) + '\n');
     if (alreadyConfigured) {
       const diff = envDiff(readFileSync(path, 'utf8'), content);
       if (diff) io.out(`\n--dry-run would OVERWRITE ${path}. Proposed diff (secrets redacted):\n${diff}`);
@@ -916,24 +1037,40 @@ export async function runHostSetup(
   // Re-run on a configured host: show the diff of proposed changes and require
   // confirmation (M5 gate: "re-running on a configured host shows the diff of any
   // proposed change"; design decision 5). Identical answers are a no-op that exits 0.
+  // The bots step can have work even when mercury.env is identical (a deleted bot config, a
+  // missing credentials copy), so "nothing to change" must consider both surfaces.
+  const botPending = botPlan !== undefined && (botPlan.configAction === 'write' || botPlan.credentialsAction === 'write');
   if (alreadyConfigured && !opts.yes) {
     const current = readFileSync(path, 'utf8');
     const diff = envDiff(current, content);
-    if (!diff) {
+    if (!diff && !botPending) {
       io.out(`\n${path} already exists and the proposed answers are identical — nothing to change.\n`);
       return 0;
     }
     io.out(`\n${path} already exists. Current state:\n`);
     printStatus(hostStatus(process.platform, env), io);
     io.out(`\nProposed changes (secrets redacted):\n`);
-    io.out(diff);
+    io.out(diff || '(no mercury.env change)\n');
+    if (botPlan) io.out(botProvisionSummary(botPlan) + '\n');
     io.out('\nPass --yes to confirm.\n');
     return 1;
   }
 
+  // Bot files first: the env write is the commit point for the server-side token, so a failure
+  // here leaves mercury.env untouched and the operator re-runs one command (§4.2: one step).
+  if (botPlan) {
+    try {
+      writeBotProvision(botPlan, env);
+    } catch (e) {
+      io.err(`\nbot: ${(e as Error).message}\n`);
+      io.err(`Nothing was written to ${path}. Fix the bot files and re-run.\n`);
+      return 1;
+    }
+  }
   writeEnvFile(path, content);
   io.out('mercury host setup\n');
   io.out(redactedSummary(answers, preservedNames) + '\n');
+  if (botPlan) io.out('\n' + botProvisionSummary(botPlan) + '\n');
   io.out(`\nWrote ${path} (mode 0600). Start the host with \`mercury host doctor\` (M4).\n`);
   // Opt-in Laya sidecar (#831): interpreter gate → venv → pinned install → credentials →
   // unit. Every command is bounded; the injected runner keeps tests off the real uv/pip.

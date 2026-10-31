@@ -61,14 +61,15 @@ import { Worker } from './worker/worker.ts';
 import { startServer } from './api/server.ts';
 import { dataPath } from './paths.ts';
 import { PresetRegistry } from './presets/presetRegistry.ts';
+import { WorkflowRegistry } from './workflows/workflowRegistry.ts';
 import { runHostInstall } from './host/install.ts';
 import { runHostProbe } from './host/probe.ts';
-import { runHostSetup } from './host/setup.ts';
+import { envFilePath, runHostSetup } from './host/setup.ts';
 import { installService, serviceStatus, uninstallService, parseServiceArgs, type ServiceOptions } from './host/service.ts';
-import { runHostDoctor } from './host/doctor.ts';
+import { loadEnvFile, runHostDoctor } from './host/doctor.ts';
 import { loadBotConfig, botConfigPath } from './host/bots/config.ts';
 import { installBotService, uninstallBotService, reassignBotRuns, parseBotServiceInstallArgs, parseBotServiceUninstallArgs } from './host/bots/service.ts';
-import { runBot, makeBotClient } from './host/bots/process.ts';
+import { runBot, makeSchedulerClient } from './host/bots/process.ts';
 import { dispatchTask } from './host/bots/dispatch.ts';
 import { statusView, renderStatus } from './host/bots/status.ts';
 import { botCredentialsPath, readBotCredentials, registeredOwnerForToken } from './host/bots/credentials.ts';
@@ -362,6 +363,24 @@ async function main(): Promise<void> {
       return;
     }
     let failed = false;
+    /**
+     * The server-side token registry as the HOST will see it: `mercury.env` is the file
+     * `mercury host setup` writes and systemd/launchd load, so it wins over the shell that
+     * happens to run `validate`. The process environment stays the fallback for a host whose
+     * registry is exported rather than written (and for tests).
+     */
+    const apiTokensRegistry = (): string | undefined => {
+      const file = envFilePath();
+      if (existsSync(file)) {
+        try {
+          const fromFile = loadEnvFile(file).MERCURY_API_TOKENS;
+          if (fromFile !== undefined && fromFile !== '') return fromFile;
+        } catch {
+          // An unreadable env file is the doctor's finding to report, not validate's to crash on.
+        }
+      }
+      return process.env.MERCURY_API_TOKENS;
+    };
     // Config.
     try {
       const cfg = loadBotConfig(alias);
@@ -396,7 +415,11 @@ async function main(): Promise<void> {
         return;
       }
       try {
-        const owner = registeredOwnerForToken(token, process.env.MERCURY_API_TOKENS);
+        // The server reads this registry from mercury.env, and the wizard writes it there; the
+        // process environment is only how a running host sees it. Reading the file first is what
+        // makes `host bot validate` answer for the install it was just written by, instead of
+        // reporting drift to an operator whose shell has not sourced the file (#915).
+        const owner = registeredOwnerForToken(token, apiTokensRegistry());
         if (owner === null) {
           process.stdout.write(`agreement FAIL: the credentials token for '${alias}' is not registered in MERCURY_API_TOKENS\n`);
           failed = true;
@@ -479,7 +502,9 @@ async function main(): Promise<void> {
     }
     try {
       const cfg = loadBotConfig(alias);
-      const client = makeBotClient(cfg);
+      // Same client the scheduler process would use: a `via: "fleet"` bot must not fire a manual
+      // dispatch onto its own host while its scheduled fires go through Fleet (#973).
+      const client = makeSchedulerClient(cfg);
       const decision = await dispatchTask(cfg, client, taskName, { nowMs: Date.now(), dryRun, yes });
       // The resolved plan (key + body) prints for a dry-run preview or a successful dispatch —
       // not on a refusal, where it would leak template material into terminals/logs.
@@ -522,7 +547,9 @@ async function main(): Promise<void> {
     }
     try {
       const cfg = loadBotConfig(alias);
-      const client = makeBotClient(cfg);
+      // Status reads the same list the single-flight check reads, so a fleet bot reports its Fleet
+      // Runs (owner=self), not its host's (#973).
+      const client = makeSchedulerClient(cfg);
       const nowMs = Date.now();
       const view = await statusView(cfg, client, nowMs);
       process.stdout.write(renderStatus(cfg, view, nowMs) + '\n');
@@ -967,6 +994,19 @@ async function main(): Promise<void> {
     knownAgents: Object.keys(gatedAdapters),
   });
 
+  // Builtin workflow templates (docs/crew/workflows.md section 3.1, issue #808). Built here for the
+  // same reason the preset registry is: the composition root is the one place that knows how a
+  // registry is assembled, and `RunService.workflowRegistry()` hands it to the W-3 routes. Without
+  // this, every host answered `GET /api/workflows` with 404 and rejected a Run's `workflow` block
+  // (issue #1078).
+  //
+  // `MERCURY_WORKFLOWS_DIR` makes the set a per-host decision rather than a property of the
+  // package: Fleet's routing filter places a workflow Run on a host that advertises that workflow,
+  // so a host must be able to carry a set another host does not (FB3, #974).
+  const workflows = new WorkflowRegistry(process.env.MERCURY_WORKFLOWS_DIR ?? dataPath('workflows'), {
+    presets,
+  });
+
   const runService = new RunService({
     db,
     runs,
@@ -974,6 +1014,7 @@ async function main(): Promise<void> {
     skills,
     selector,
     presets,
+    workflows,
     knownAgents: Object.keys(gatedAdapters),
     agentCapabilities: () => agentCapabilities.snapshot(),
     goals,

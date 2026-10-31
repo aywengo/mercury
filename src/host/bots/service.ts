@@ -305,13 +305,20 @@ export function removeBotTokenFromEnv(envText: string, alias: string): { text: s
         throw new Error(`MERCURY_API_TOKENS entry ${ei} in line ${lineNo + 1} is not 'token:owner'; fix mercury.env by hand`);
       }
     }
+    let lineRemoved = 0;
     const kept = entries.filter((e) => {
-      const [tok, owner] = e.split(':');
-      if (owner!.trim() === `bot-${alias}`) { removed++; return false; }
+      const owner = e.split(':')[1];
+      if (owner!.trim() === `bot-${alias}`) { lineRemoved++; return false; }
       return true;
     });
+    removed += lineRemoved;
+    // Nothing for this alias: leave the line byte-for-byte as it was (a no-op uninstall must not
+    // rewrite the operator's spacing).
+    if (lineRemoved === 0) return line;
     if (kept.length === 0) return '';
-    return `MERCURY_API_TOKENS=${kept.join(', ')}`;
+    // Comma only (no space): the value must stay inside mercury.env's safe charset, which the
+    // wizard validates on the next `host setup` re-run.
+    return `MERCURY_API_TOKENS=${kept.join(',')}`;
   });
   return { text: outLines.join('\n'), removed };
 }
