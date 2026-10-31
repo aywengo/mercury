@@ -130,7 +130,12 @@ function saveRunLedger(env: NodeJS.ProcessEnv, entries: RunLedgerEntry[]): void 
   // about -- the Run killed at its notAfter deadline WHILE `next.ts` writes. A truncated file
   // reads as an empty ledger, which would silently empty the "never called finish/blocked" section
   // for the very night it matters.
-  const tmp = `${p}.tmp`;
+  // The temp name carries the writer's pid (#1026): with a fixed `${p}.tmp`, two concurrent
+  // `next.ts` processes race the SAME temp file, and the loser's renameSync throws ENOENT into
+  // the catch, silently dropping its claim or terminal call. A per-pid name makes the rename
+  // own-writer-only. The read-modify-write itself still last-writer-wins (there is no lock);
+  // what the pid removes is the ENOENT drop, not the lost update.
+  const tmp = `${p}.${process.pid}.tmp`;
   writeFileSync(tmp, JSON.stringify(entries.slice(-RUN_LEDGER_CAP), null, 2), { mode: 0o600 });
   renameSync(tmp, p);
   chmodSync(p, 0o600);
