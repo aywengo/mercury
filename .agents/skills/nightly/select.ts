@@ -193,11 +193,20 @@ export function failingTestMentions(output: string): string[] {
  * Whether one failing job's LOG mentions ONLY known-flake tests. A job with no extractable
  * failing-test names is a real failure (typecheck, plan-tracker and installer jobs rarely name
  * tests) — fail toward resuming, never toward ignoring red CI.
+ *
+ * Matching is by COMPLETE name (#980 review r5): a substring match let a recorded
+ * `retries a flaky request` also suppress `retries a flaky request with invalid credentials` —
+ * a DISTINCT test, a real failure. The one explicit normalization is path-shaped: the spec
+ * reporter names a file-level failure by the file's path as invoked (the job log carries the
+ * worktree's absolute path), while the flake clock records the REPO-relative path
+ * (`e2e/knowledge.test.ts`) — so a path mention matches when it ENDS with the recorded path at
+ * a `/` segment boundary, never by substring.
  */
 export function isFlakeConfinedJob(output: string, flakeTests: string[]): boolean {
   const mentioned = failingTestMentions(output);
   if (mentioned.length === 0) return false;
-  const known = (t: string): boolean => flakeTests.some((f) => f === t || f.includes(t) || t.includes(f));
+  const known = (t: string): boolean =>
+    flakeTests.includes(t) || flakeTests.some((f) => f !== '' && t.endsWith(`/${f}`));
   return mentioned.every(known);
 }
 
@@ -241,7 +250,8 @@ export const JOB_LOG_MAX_BYTES = 2 * 1024 * 1024;
  * `externalId` is the Actions job id (the check run's `external_id`); the log endpoint
  * 302-redirects to a signed URL and node's fetch follows it (verified 2026-11-01). Bounds:
  * FETCH_TIMEOUT_MS per fetch and JOB_LOG_MAX_BYTES of text. null = no log (missing transport,
- * non-numeric id, fetch failure, non-2xx) — the caller treats that as a real failure.
+ * non-numeric id, fetch failure, non-2xx, or a body past the cap — truncated evidence cannot
+ * exonerate a head, #980 review r5) — the caller treats that as a real failure.
  */
 export async function fetchJobLog(
   io: { getText?: (path: string) => Promise<{ status: number; text: string } | null> },
@@ -255,7 +265,11 @@ export async function fetchJobLog(
   try {
     const res = await io.getText(`/repos/${repo}/actions/jobs/${jobId}/logs`);
     if (res === null || res.status < 200 || res.status >= 300) return null;
-    return res.text.length > JOB_LOG_MAX_BYTES ? res.text.slice(0, JOB_LOG_MAX_BYTES) : res.text;
+    // The same policy as ghGetText's cap: a body PAST the cap is truncated evidence, and
+    // truncated evidence cannot establish a flake-only failure — a real failure after the cap
+    // would otherwise be exonerated by a flake marker in the returned prefix (#980 review r5).
+    if (res.text.length > JOB_LOG_MAX_BYTES) return null;
+    return res.text;
   } catch {
     return null;
   }
@@ -994,11 +1008,12 @@ export async function runSelectorWith(
           console.error(`resume scan: PR #${pr.number} threads failed: ${String(e instanceof Error ? e.message : e)}`);
           rvScanComplete = false;
         }
-        if (!rvScanComplete) continue; // fail closed for THIS PR: no resume, but the issue stays reserved
         // Owner change request on the CURRENT head (#968): resume regardless of Copilot. A commit
         // pushed after the review moves the head, so an answered review waits for re-review
-        // instead of being resumed again. Excluded issues never resume.
-        if (lastOwner !== null && lastOwner.state === 'CHANGES_REQUESTED' && lastOwner.commit_id === headSha
+        // instead of being resumed again. Owner precedence applies only when the review evidence
+        // is COMPLETE — an incomplete scan cannot decide whose review is the latest (#980
+        // review r5). Excluded issues never resume.
+        if (rvScanComplete && lastOwner !== null && lastOwner.state === 'CHANGES_REQUESTED' && lastOwner.commit_id === headSha
           && !isExcluded(issueCandidate.issue)) {
           resume.push({ issue, prNumber: pr.number, headSha, state: 'owner-changes', createdAt: pr.created_at ?? '' });
           continue;
@@ -1007,8 +1022,10 @@ export async function runSelectorWith(
         // conclusion failure. Check runs are GitHub metadata (names, statuses, conclusions and
         // the Actions job id) — never PR or comment text. The known-flake guard reads the
         // failing job's LOG through that id (#980 review r2).
-        // A capped or failed scan fails closed for this PR's red-ci signal only: the Copilot
-        // review logic below still runs, and the issue stays reserved from new work either way.
+        // CI state is NOT review evidence (#980 review r5): this scan runs even when the review
+        // scan is incomplete — a readable, completed failing `ci` check is a signal whatever the
+        // thread query did. A capped or failed CHECK-RUNS scan fails closed for this PR's red-ci
+        // signal only; the issue stays reserved from new work either way.
         {
           let crPath: string | null = `/repos/${repo}/commits/${headSha}/check-runs?per_page=100`;
           const checkRuns: CheckRunShim[] = [];
@@ -1039,6 +1056,15 @@ export async function runSelectorWith(
               const real: string[] = [];
               for (const job of failing) {
                 const run = byName.get(job);
+                // Only a job that concluded `failure` can be flake-confined (#980 review r5):
+                // a job that TIMED OUT or was CANCELLED is interrupted execution — its log may
+                // print a known-flake marker and then hang — so it stays a real failure no
+                // matter what the log says. A missing run or an unknown conclusion: the same,
+                // fail toward resuming.
+                if (run?.conclusion !== 'failure') {
+                  real.push(job);
+                  continue;
+                }
                 const log = await fetchJobLog(io, repo, run?.external_id);
                 if (log !== null && isFlakeConfinedJob(log, flakeTests)) {
                   console.error(`resume scan: PR #${pr.number} job '${job}' confined to known flakes; not a signal on its own`);
@@ -1060,6 +1086,10 @@ export async function runSelectorWith(
             console.error(`resume scan: PR #${pr.number} check-runs capped; red ci not evaluated`);
           }
         }
+        // The review-based signal (Copilot findings) needs the COMPLETE review scan: an
+        // incomplete scan fails closed for THIS PR — no findings resume, but the issue stays
+        // reserved from new work (#980 review r5).
+        if (!rvScanComplete) continue;
         const hasHeadReview = lastCopilot !== null && lastCopilot.commit_id === headSha;
         if (!hasHeadReview || lastCopilot === null) continue; // relay fetches the review first
         if (lastCopilot.state === 'APPROVED') continue; // awaiting merge; not resume work

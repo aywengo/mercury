@@ -1527,6 +1527,9 @@ function redCiIo(opts: {
   failingJobs?: { name: string; conclusion?: string; externalId?: string; log?: string; logStatus?: number; logError?: boolean }[];
   ownerReviews?: { state: string; commit_id: string }[];
   copilotThreads?: number;
+  /** Capped thread query (hasNextPage: true): the review scan is INCOMPLETE, so review-based
+   *  signals fail closed for the PR — CI-based signals are not review evidence (#980 r5). */
+  threadsIncomplete?: boolean;
   extraReadyIssue?: boolean;
 }) {
   const trusted = issue({ number: 965, user: { login: 'aywengo' } });
@@ -1562,6 +1565,9 @@ function redCiIo(opts: {
     },
     async post() { return true; },
     async postJson() {
+      if (opts.threadsIncomplete) {
+        return { status: 200, body: { data: { repository: { pullRequest: { reviewThreads: { totalCount: 101, pageInfo: { hasNextPage: true }, nodes: [] } } } } } };
+      }
       const n = opts.copilotThreads ?? 0;
       const nodes = Array.from({ length: n }, () => ({ isResolved: false, isOutdated: false, comments: { nodes: [{ author: { login: 'copilot-pull-request-reviewer' }, originalCommit: { oid: 'sha965' } }] } }));
       return { status: 200, body: { data: { repository: { pullRequest: { reviewThreads: { totalCount: n, pageInfo: { hasNextPage: false }, nodes } } } } } };
@@ -1879,6 +1885,82 @@ test('#980: a capped check-runs scan fails the red-ci signal closed (no resume, 
   };
   const s = await runSelectorWith(io as never, { REPO: 'aywengo/mercury' }, true);
   assert.notEqual(s.rung, 0, 'unknown CI state never fakes a red-ci resume');
+});
+
+test('#980: the flake guard matches COMPLETE test names — a superset name is a real failure', async () => {
+  const { isFlakeConfinedJob } = await import('../.agents/skills/nightly/select.ts');
+  assert.equal(isFlakeConfinedJob('✖ retries a flaky request (1.0ms)\n', ['retries a flaky request']), true, 'the recorded name itself matches');
+  assert.equal(isFlakeConfinedJob('✖ retries a flaky request with invalid credentials (1.0ms)\n', ['retries a flaky request']), false, 'a DISTINCT test whose name contains the flake is a real failure');
+  assert.equal(
+    isFlakeConfinedJob('✖ e2e/retries a flaky request (1.0ms)\n✖ e2e/retries a flaky request with invalid credentials (1.0ms)\n', ['e2e/retries a flaky request']),
+    false,
+    'the flake next to a distinct superset-named failure is not confined',
+  );
+});
+
+test('#980: a path-shaped flake mention normalizes to the repo-relative recorded name', async () => {
+  const { isFlakeConfinedJob } = await import('../.agents/skills/nightly/select.ts');
+  // The spec reporter names a file-level failure by the file's path as invoked — the job log
+  // carries the worktree's absolute path; the flake clock records the repo-relative path.
+  assert.equal(
+    isFlakeConfinedJob('✖ /Users/roman/worktrees/run_abc123/e2e/knowledge.test.ts (12.3ms)\n', ['e2e/knowledge.test.ts']),
+    true,
+    'a worktree-absolute path ends with the recorded path at a / segment boundary',
+  );
+  assert.equal(
+    isFlakeConfinedJob('✖ e2e/knowledge.test.ts.extra (12.3ms)\n', ['e2e/knowledge.test.ts']),
+    false,
+    'a different file that merely contains the recorded name is not the flake',
+  );
+});
+
+test('#980: an incomplete review scan does not suppress the red-ci signal (CI is not review evidence)', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const s = await runSelectorWith(redCiIo({
+    failingJobs: [{ name: 'test (node 22.18.0)' }],
+    threadsIncomplete: true,
+  }) as never, { REPO: 'aywengo/mercury' }, true);
+  assert.equal(s.rung, 0, 'a readable, completed failing ci check resumes even when the thread query is capped');
+  assert.equal(s.issue, 965);
+  assert.match(s.reason, /red ci on head sha965/);
+  // And no false signal in the other direction: a GREEN head with an incomplete review scan
+  // still does not resume — unknown CI state waits.
+  const s2 = await runSelectorWith(redCiIo({ ciConclusion: 'success', threadsIncomplete: true }) as never, { REPO: 'aywengo/mercury' }, true);
+  assert.notEqual(s2.rung, 0, 'no ci signal and incomplete review evidence: nothing to resume');
+});
+
+test('#980: a known-flake-plus-timeout job still resumes (a timeout is interrupted execution, not a flake)', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const home = await flakeHome();
+  // The log prints ONLY the known-flake marker — but the job concluded timed_out (it hung
+  // after the flake), so the flake exemption does not apply.
+  const s = await runSelectorWith(redCiIo({
+    failingJobs: [{
+      name: 'test (node 22.18.0)',
+      conclusion: 'timed_out',
+      externalId: '9001',
+      log: '✖ e2e/retries a flaky request (12.3ms)',
+    }],
+  }) as never, { REPO: 'aywengo/mercury', XDG_STATE_HOME: home }, true);
+  assert.equal(s.rung, 0, 'only a job concluded `failure` is eligible for the flake exemption');
+  assert.match(s.reason, /test \(node 22\.18\.0\)/);
+  // Same for a cancelled job.
+  const s2 = await runSelectorWith(redCiIo({
+    failingJobs: [{
+      name: 'test (node 24.x)',
+      conclusion: 'cancelled',
+      externalId: '9002',
+      log: '✖ e2e/retries a flaky request (12.3ms)',
+    }],
+  }) as never, { REPO: 'aywengo/mercury', XDG_STATE_HOME: home }, true);
+  assert.equal(s2.rung, 0, 'a cancelled job is interrupted execution too');
+});
+
+test('#980: a job log past the cap is truncated evidence — no exemption, the job stays real', async () => {
+  const { fetchJobLog, JOB_LOG_MAX_BYTES } = await import('../.agents/skills/nightly/select.ts');
+  const big = '✖ e2e/retries a flaky request (12.3ms)\n' + 'x'.repeat(JOB_LOG_MAX_BYTES);
+  const log = await fetchJobLog({ async getText() { return { status: 200, text: big }; } }, 'aywengo/mercury', '123');
+  assert.equal(log, null, 'a body past JOB_LOG_MAX_BYTES is truncated: null, never a usable prefix');
 });
 
 test('#1010: the gate reports its STATE, so "passed" and "never checked" stop being the same value', async () => {

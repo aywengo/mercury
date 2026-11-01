@@ -7,7 +7,7 @@ import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { REPO_RE, assertRepo, localDateString, nextDay, prevDay } from '../.agents/skills/nightly/shared.ts';
+import { REPO_RE, assertRepo, localDateString, nextDay, prevDay, readBoundedText } from '../.agents/skills/nightly/shared.ts';
 
 const NIGHTLY_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', '.agents', 'skills', 'nightly');
 
@@ -48,4 +48,36 @@ test('drift guard: no nightly script defines its own assertRepo/ghGet/ghPost/loc
     const src = readFileSync(join(NIGHTLY_DIR, f), 'utf8');
     assert.ok(!/\^\[A-Za-z0-9_\.\-\]\+\\\/\[A-Za-z0-9_\.\-\]\+\$/.test(src), `${f} carries a loose inline repo regex`);
   }
+});
+
+test('#980: readBoundedText reports truncation and cancels the stream at the cap', async () => {
+  const enc = new TextEncoder();
+  const big = new ReadableStream<Uint8Array>({
+    start(c) {
+      c.enqueue(enc.encode('a'.repeat(100)));
+      c.enqueue(enc.encode('b'.repeat(100)));
+      c.close();
+    },
+  });
+  const r = await readBoundedText(big, 150);
+  assert.equal(r.truncated, true, 'the body did not end before the cap: the text is a prefix');
+  assert.ok(r.text.length >= 150 && r.text.length <= 200, 'the read stops at the cap (plus at most the chunk that crossed it)');
+  assert.ok(r.text.startsWith('a'.repeat(100)), 'the kept text is an intact prefix of the body');
+  // A body that ends before the cap is complete: not truncated, whole text.
+  const small = new ReadableStream<Uint8Array>({
+    start(c) {
+      c.enqueue(enc.encode('abc'));
+      c.close();
+    },
+  });
+  assert.deepEqual(await readBoundedText(small, 16), { text: 'abc', truncated: false });
+  // The cap is BYTES: 17 two-byte characters are 34 bytes, well past a 16-byte cap.
+  const multi = new ReadableStream<Uint8Array>({
+    start(c) {
+      c.enqueue(enc.encode('é'.repeat(17))); // 34 bytes
+      c.close();
+    },
+  });
+  const r2 = await readBoundedText(multi, 16);
+  assert.equal(r2.truncated, true, 'the byte cap, not the character count, decides');
 });

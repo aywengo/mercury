@@ -220,14 +220,42 @@ export function ghDelete(path: string, token: string): Promise<{ body: unknown; 
 }
 
 /**
+ * Read a body stream up to maxBytes of it, reporting whether the body ENDED before the cap.
+ * `truncated` true = the returned text is a PREFIX, not the whole body. The early stop cancels
+ * through the READER, not `res.body.cancel()`: while the reader holds the stream lock,
+ * cancelling the body rejects — the reader is the stream's own cancel path (#980 review r5).
+ * A read error throws; the caller owns the failure policy.
+ */
+export async function readBoundedText(body: ReadableStream<Uint8Array>, maxBytes: number): Promise<{ text: string; truncated: boolean }> {
+  const limit = Math.max(1, maxBytes);
+  const reader = body.getReader();
+  const decoder = new TextDecoder('utf-8');
+  let text = '';
+  let bytes = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    text += decoder.decode(value, { stream: true });
+    bytes += value.byteLength;
+    if (bytes >= limit) {
+      await reader.cancel().catch(() => {});
+      return { text, truncated: true }; // cap hit: the body did NOT end
+    }
+  }
+  return { text, truncated: false };
+}
+
+/**
  * Plain-text GET for endpoints whose response is not JSON — the Actions job log,
  * `GET /repos/{owner}/{repo}/actions/jobs/{job_id}/logs`, which 302-redirects to a signed URL
  * that node's fetch follows (verified 2026-11-01 against a live run). Bounded twice, like every
  * nightly fetch: FETCH_TIMEOUT_MS on the request (the abort also cuts a slow body stream), and
- * the BODY read stops at maxBytes — the log is truncated, the response dropped — so a hung or
- * oversized log cannot grow memory or the selector's wall clock. A fetch failure (network, DNS,
- * timeout, unreadable body) yields null; non-2xx responses are returned with their status so the
- * caller owns the policy.
+ * the BODY read stops at maxBytes. A TRUNCATED body yields null, not a prefix: incomplete
+ * evidence must not exonerate a head — a real failure after the cap would otherwise be hidden
+ * behind a flake marker in the returned prefix (#980 review r5). So a hung or oversized log
+ * cannot grow memory or the selector's wall clock. A fetch failure (network, DNS, timeout,
+ * unreadable body) yields null; non-2xx responses are returned with their status so the caller
+ * owns the policy.
  */
 export async function ghGetText(path: string, token: string, maxBytes: number): Promise<{ status: number; text: string } | null> {
   let res: Response;
@@ -242,24 +270,21 @@ export async function ghGetText(path: string, token: string, maxBytes: number): 
   }
   const limit = Math.max(1, maxBytes);
   let text = '';
+  let truncated = false;
   try {
     if (res.body) {
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder('utf-8');
-      let bytes = 0;
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        text += decoder.decode(value, { stream: true });
-        bytes += value.byteLength;
-        if (bytes >= limit) break; // cap hit: keep what we have, drop the rest
-      }
-      await res.body.cancel().catch(() => {});
+      ({ text, truncated } = await readBoundedText(res.body, limit));
     } else {
-      text = await res.text();
+      // No stream to read (a consumed or null body): read the whole body and judge the cap on
+      // BYTES, not decoded characters — a multi-byte body can be over the cap and still decode
+      // to under `limit` characters.
+      const buf = Buffer.from(await res.arrayBuffer());
+      if (buf.byteLength > limit) truncated = true;
+      text = buf.toString('utf-8');
     }
   } catch {
     return null;
   }
-  return { status: res.status, text: text.length > limit ? text.slice(0, limit) : text };
+  if (truncated) return null; // incomplete evidence is no evidence (#980 review r5)
+  return { status: res.status, text };
 }
