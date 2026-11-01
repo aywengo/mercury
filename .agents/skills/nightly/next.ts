@@ -272,17 +272,21 @@ export async function blockIssue(io: NextIo, opts: { repo: string; issue: number
   if (opts.pr !== undefined) {
     if (!Number.isInteger(opts.pr) || opts.pr <= 0) throw new Error('--pr must be a positive PR number');
     // The head SHA: the derivation binds findings to it, and the hand-off quotes it.
+    // A hand-off must never fail on the derivation (#966 review): when the PR cannot be read or
+    // has no head, the question still goes out, with the could-not-derive caveat, and the issue
+    // is still labeled. A failed hand-off would leave the claim held and the human unasked.
     const prRes = await io.get(`/repos/${opts.repo}/pulls/${opts.pr}`);
-    if (prRes.status < 200 || prRes.status >= 300) {
-      throw new Error(`blocked --pr: could not read PR #${opts.pr} (GET returned ${prRes.status}); the head cannot be derived, so no count can be checked`);
+    const headSha = prRes.status >= 200 && prRes.status < 300
+      ? (prRes.body as { head?: { sha?: string | null } | null })?.head?.sha ?? ''
+      : '';
+    if (!headSha) {
+      console.error(`blocked --pr: could not read PR #${opts.pr}'s head (GET returned ${prRes.status}); handing off with the could-not-derive caveat`);
     }
-    const headSha = (prRes.body as { head?: { sha?: string | null } | null })?.head?.sha ?? '';
-    if (!headSha) throw new Error(`blocked --pr: PR #${opts.pr} has no head sha; cannot derive current-head findings`);
     // The shared helper treats an unreadable review page as an EMPTY one: it reads `body ?? []`
     // and never checks the status, so a 502/503 with a non-JSON body would look like "no last
     // Copilot review" and keep `complete` true. Fail the read here instead (the same status check
     // `runNext` applies to its transport) so it reaches the helper's fail-closed path (Copilot, #966).
-    const state = await copilotHeadState(
+    const state = headSha === '' ? null : await copilotHeadState(
       {
         get: async (path: string) => {
           const res = await io.get(path);
@@ -296,14 +300,17 @@ export async function blockIssue(io: NextIo, opts: { repo: string; issue: number
       headSha,
       'blocked --pr',
     );
-    if (state.complete) {
-      // Refuse unsourced counts (#860 acceptance 2): a stated count that differs from the
-      // derived one means the reason was recalled, not derived - refuse BEFORE any write.
+    if (state !== null && state.complete) {
+      // The derived block is authoritative (#860; #966 review). A count the agent states in its
+      // reason is never trusted and never blocks the hand-off: when it disagrees, the comment says
+      // so next to the derived count and a warning is logged.
       const stated = statedFindingCounts(reason);
-      if (stated.some((n) => n !== state.findings.length)) {
-        throw new Error(`blocked --pr: the reason states finding count(s) [${stated.join(', ')}] but PR #${opts.pr}'s current head has ${state.findings.length} open Copilot finding(s); derive the reason from the PR (blocked --pr) instead of recalling earlier rounds - nothing was posted`);
+      const mismatch = stated.some((n) => n !== state.findings.length);
+      if (mismatch) {
+        console.error(`blocked --pr: the reason states finding count(s) [${stated.join(', ')}] but PR #${opts.pr}'s current head has ${state.findings.length}; the derived count is posted`);
       }
-      question = reason + derivedFindingsBlock(opts.pr, headSha, state);
+      question = reason + derivedFindingsBlock(opts.pr, headSha, state)
+        + (mismatch ? `\n\n_The reason above mentions ${stated.join(', ')} finding(s); the count derived from the current head (${state.findings.length}) is the one to trust._` : '');
     } else {
       // Fail closed (#860 acceptance 3): the count is unknown, the caveat says so.
       question = reason + underivedFindingsBlock(opts.pr);

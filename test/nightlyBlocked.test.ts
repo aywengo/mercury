@@ -89,14 +89,13 @@ test('blocked --pr derives the current-head findings and appends them to the que
   assert.doesNotMatch(body, /already fixed|stale round-1|older round|not copilot/);
 });
 
-test('blocked --pr refuses a stated count that differs from the derived one, posting NOTHING (#860)', async () => {
+test('blocked --pr: a stated count that differs from the derived one still hands off, with the derived count (#860; #966 review)', async () => {
   const { io, log } = makeIo({ reviewThreads: { totalCount: 6, pageInfo: { hasNextPage: false }, nodes: threadNodes() } });
-  await assert.rejects(
-    () => blockIssue(io, { repo: 'aywengo/mercury', issue: 860, reason: 'PR has 11 open findings', pr: PR }, { GH_TOKEN: 'test-token' }),
-    /11[\]\s][\s\S]*2 open Copilot/,
-  );
-  assert.equal(log.labelPosts, 0, 'the label must NOT be applied when the count is refused');
-  assert.equal(log.comments.length, 0, 'no comment with a wrong number');
+  const res = await blockIssue(io, { repo: 'aywengo/mercury', issue: 860, reason: 'addressed 11 Copilot findings in round 1; the rest need a decision', pr: PR }, { GH_TOKEN: 'test-token' });
+  assert.equal(res.commented, true, 'the hand-off is never refused over a recalled count');
+  assert.equal(log.labelPosts, 1);
+  assert.match(log.comments[0]!, /open findings on this head: 2/, 'the derived count is posted');
+  assert.match(log.comments[0]!, /mentions 11 finding\(s\); the count derived from the current head \(2\) is the one to trust/);
 });
 
 test('blocked --pr accepts a reason with no stated count and one with the matching count', async () => {
@@ -126,14 +125,19 @@ test('blocked --pr fails closed on a non-200 thread query too (#860)', async () 
   assert.match(log.comments[0]!, /could NOT be derived/);
 });
 
-test('blocked --pr with an unreadable PR throws before any write (#860)', async () => {
-  const { io, log } = makeIo({ reviewThreads: { totalCount: 2, pageInfo: { hasNextPage: false }, nodes: [] }, pulls: { body: null, status: 404 } });
-  await assert.rejects(
-    () => blockIssue(io, { repo: 'aywengo/mercury', issue: 860, reason: 'cap reached', pr: PR }, { GH_TOKEN: 'test-token' }),
-    /could not read PR/,
-  );
-  assert.equal(log.labelPosts, 0);
-  assert.equal(log.comments.length, 0);
+test('blocked --pr with an unreadable PR still hands off, with the could-not-derive caveat (#966 review)', async () => {
+  const { io, log } = makeIo({ reviewThreads: { totalCount: 2, pageInfo: { hasNextPage: false }, nodes: [] }, pulls: { body: null, status: 502 } });
+  const res = await blockIssue(io, { repo: 'aywengo/mercury', issue: 860, reason: 'cap reached', pr: PR }, { GH_TOKEN: 'test-token' });
+  assert.equal(res.commented, true);
+  assert.equal(log.labelPosts, 1, 'the issue is still labeled blocked');
+  assert.match(log.comments[0]!, /could NOT be derived/);
+});
+
+test('blocked --pr with a PR that has no head sha still hands off (#966 review)', async () => {
+  const { io, log } = makeIo({ reviewThreads: { totalCount: 2, pageInfo: { hasNextPage: false }, nodes: [] }, pulls: { body: { head: null }, status: 200 } });
+  const res = await blockIssue(io, { repo: 'aywengo/mercury', issue: 860, reason: 'cap reached', pr: PR }, { GH_TOKEN: 'test-token' });
+  assert.equal(res.commented, true);
+  assert.match(log.comments[0]!, /could NOT be derived/);
 });
 
 test('statedFindingCounts: narrow - prose numbers (issue/PR numbers) never trip the refusal', () => {
