@@ -541,6 +541,17 @@ export const MIGRATIONS: string[] = [
   UPDATE runs SET first_started_at = started_at
    WHERE first_started_at IS NULL AND started_at IS NOT NULL;
   `,
+  // v22: when the start-up sweep (#976) last redacted a Run's agent artifacts. NULL = not
+  // swept yet. Only runs that ended FAILED through the reaper -- the worker never finalizes
+  // them, so their workspaces never went through the finalize-time scrub (issue #944) -- are
+  // candidates; for those this column is what stops the sweep re-scanning the same workspace
+  // on every worker start. Terminal runs are never re-executed, so a sweep that has run once
+  // over a workspace (agent process gone, files stable) is done for that workspace's lifetime:
+  // workspace GC deleting the directory deletes the question with it, and a dead Run's files
+  // cannot change under us.
+  `
+  ALTER TABLE runs ADD COLUMN artifacts_swept_at TEXT;
+  `,
 ];
 
 export const BUSY_TIMEOUT_MS = 5_000;

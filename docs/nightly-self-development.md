@@ -190,7 +190,10 @@ issue `nightly:blocked`, put the question in an issue comment, finish the Run.
    pair are covered; other encodings (percent-encoding in arbitrary positions,
    hex) are not. Files larger than 256 MiB are skipped with a logged warning
    rather than read whole. A Run a worker never finalizes (worker crash, lease
-   reaped by another worker) is not covered — tracked as a follow-up.
+   reaped by another worker) misses that pass, so a start-up sweep covers it
+   (#976): on every worker start, before the first claim, the same pass runs
+   once over the workspaces of the runs the reaper failed, and a database
+   stamp keeps it from repeating on every start.
 6. **Budgets.** Per-Run caps are rules in the `nightly` skill ("Unattended
    limits"): at most 2 review rounds per PR, one PR per Run, one batched push
    per round, and a hand-off when the diff outgrows 3x its first passing

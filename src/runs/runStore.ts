@@ -32,6 +32,7 @@ export interface RunRow {
   origin_kind: string | null;
   origin_ref: string | null;
   first_started_at: string | null;
+  artifacts_swept_at: string | null;
   final_commits_json: string;
   pr_url: string | null;
   model: string | null;
@@ -170,6 +171,47 @@ export class RunStore {
       )
       .all(root.id) as unknown as RunRow[];
     return rows.map(rowToRun);
+  }
+
+  /**
+   * Terminal runs whose workspaces may still hold unredacted agent artifacts (issue #976).
+   *
+   * A run that ended FAILED through the reaper (`reapExpiredLeases`) never reached the
+   * worker's finalize-time scrub (#944): the process died first, so its session transcript
+   * and kernel snapshots sit in the workspace unredacted. The worker's start-up sweep runs
+   * the same pass over those workspaces; this is its candidate list.
+   *
+   * The error string is a parameter rather than a constant RunStore imports because
+   * RunQueue (which owns LEASE_EXPIRED_ERROR) already imports RunStore -- a reverse import
+   * would cycle. Only the reaper writes that error to runs.error, so equality against it is
+   * exactly "failed without the worker finalizing it".
+   *
+   * No limit: the set is the cluster's crashed runs that have not yet been swept, and each
+   * candidate costs one stat plus, only while the workspace still exists, a file walk. A
+   * silent cap would leave the oldest crash's secrets on disk the longest.
+   */
+  listUnsweptFailed(error: string): { id: string; workspacePath: string | null }[] {
+    const rows = this.db
+      .prepare(
+        `SELECT id, workspace_path FROM runs
+         WHERE status = 'FAILED' AND error = ? AND artifacts_swept_at IS NULL
+         ORDER BY created_at ASC, id ASC`,
+      )
+      .all(error) as { id: string; workspace_path: string | null }[];
+    return rows.map((r) => ({ id: r.id, workspacePath: r.workspace_path }));
+  }
+
+  /**
+   * Record that the start-up sweep has redacted a run's workspace (#976). Once stamped the run
+   * leaves the candidate list, so the sweep never re-scans a dead run's stable files on every
+   * worker start. Idempotent: returns whether THIS call stamped it (false when a concurrent
+   * worker beat us -- harmless, the redaction pass itself is idempotent).
+   */
+  markArtifactsSwept(id: string): boolean {
+    const res = this.db
+      .prepare('UPDATE runs SET artifacts_swept_at = ? WHERE id = ? AND artifacts_swept_at IS NULL')
+      .run(new Date().toISOString(), id);
+    return res.changes === 1;
   }
 
   list(opts: { ownerId?: string; status?: RunStatus; origin?: RunOriginKind; limit: number; cursor?: string }): { runs: Run[]; nextCursor: string | null } {
