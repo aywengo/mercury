@@ -868,9 +868,12 @@ function digestBody(night: string, data: ReportData, note?: string): string {
   section('## PRs opened', () => list(data.prs, '_none_'));
   section('## Issues filed', () => list(data.issuesFiled, '_none_'));
   section('## Issues commented', () => list(data.issuesCommented, '_none_'));
-  // #1024: the two recovery sections render EARLY, right after the claims-released list. `section()`
-  // drops a heading once the 60 KB budget is gone, and these two carry the acceptance criteria that
-  // make a lost night visible -- they must not be the ones an oversized night truncates away.
+  // #1024: the two recovery sections render EARLY, BEFORE the claims-released list (and before
+  // every other section below): `section()` drops a heading once the shared 60 KB budget is
+  // gone, and these two carry the recovery data that makes a lost night visible, so they come
+  // first. The guarantee is bounded, not absolute -- the budget is shared and charged in render
+  // order, so a huge PR/issues/commented list rendered above still exhausts it first, and on an
+  // oversized night even these headings can be truncated away.
   section('## Runs that ended with unpushed commits', () =>
     bounded(data.unpushedCommits.map((r) => {
       const shas = r.commits.slice(0, 5).map((c) => codeSpan(c.slice(0, 7), 12)).join(', ');

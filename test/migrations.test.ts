@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
 import { join } from 'node:path';
@@ -408,4 +408,20 @@ test('concurrent first-open of a fresh database migrates exactly once (issue #28
   db.close();
   assert.equal(rows.length, MIGRATIONS.length, 'schema_migrations must hold exactly one row per migration');
   assert.deepEqual(rows.map((r) => r.version), MIGRATIONS.map((_, i) => i + 1));
+});
+
+test('openDatabase creates the data directory it is given (issue #1074)', () => {
+  // A host installed with the documented `npm install -g` path has nothing that creates
+  // `${XDG_STATE_HOME:-~/.local/state}/mercury`, so both services crash-looped on
+  // `unable to open database file`. Opening the database is where that directory belongs.
+  const dir = tempDir('mercury-open-db-');
+  const dbPath = join(dir, 'state', 'mercury', 'mercury.db');
+  try {
+    assert.ok(!existsSync(join(dir, 'state')), 'the parent does not exist yet');
+    const db = openDatabase(dbPath);
+    db.close();
+    assert.ok(existsSync(dbPath), 'the database exists where the caller asked for it');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

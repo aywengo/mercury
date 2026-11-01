@@ -85,6 +85,10 @@ function answers(over: Partial<HostSetupAnswers> = {}): HostSetupAnswers {
     harnesses: ['primeagent', 'hermes'],
     layaEnabled: false,
     layaUrl: '',
+    botEnabled: false,
+    botAlias: 'maint',
+    botHarness: 'primeagent',
+    botPosture: 'scheduler',
     ...over,
   };
 }

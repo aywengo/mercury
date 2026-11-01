@@ -281,10 +281,24 @@ never observe them.
 Credentials: `GH_TOKEN`/`GITHUB_TOKEN` is required for every request — the
 searches too, including `--dry-run`. A read-only token is enough for
 `--dry-run`; a real run also needs repo write because it files and closes
-issues. Sections:
+issues. Sections, in render order (the shared 60 KB issue-body budget is charged in this
+order, so an oversized night truncates the LATER sections first):
 
 - **PRs opened** and **issues filed** tonight (GitHub search, repo-scoped).
 - **Issues commented** tonight.
+- **Runs that ended with unpushed commits** (#1024) — Runs whose `run.unpushed_commits` event
+  names commits reachable from no remote branch. The record is written when a Run COMPLETES;
+  a Run stopped by `notAfter` (`TIMED_OUT`) or failed mid-work keeps its commits in the same
+  worktree but emits nothing, so read `<baseDir>/worktrees/<runId>` (the workspace base dir from
+  `src/config.ts`) before GC when a night ends badly — the notAfter and failed rows name only the
+  Run id and task, not the worktree. Each line carries the Run id, the branch it was
+  meant for, the commits and the worktree path, so the work can be recovered by hand. Mercury
+  never pushes on an agent's behalf; this section is the recovery pointer.
+- **nightly-next Runs that never called finish/blocked** (#1024) — Runs that claimed an issue
+  (`next.ts run`) and never reached a terminal call, read from the Run ledger
+  (`${XDG_STATE_HOME:-~/.local/state}/mercury/nightly/run-ledger.json`, written by `next.ts`).
+  Each line carries the Run id, the issue and the worktree path. A progress message is not an
+  exit path.
 - **Claims released** tonight (#1001) — issues whose `nightly:in-progress` claim the selector
   released because the claiming Run ended with no PR and no comment.
 - **Blocked** — open `nightly:blocked` issues with their blocking question (the never-asks exit
@@ -294,21 +308,13 @@ issues. Sections:
   ROOT without `/api` (e.g. `http://127.0.0.1:4620`) — the script appends `/api/runs` itself;
   a URL that already ends in `/api` silently yields an empty section. When unset the section
   is empty, not faked.
+- **Runs that failed** (#1042) — the night's FAILED Runs with their redacted error reason: a
+  model outage or a crashed Run fails without a PR, a comment or a claim release, and every
+  other section would say `_none_` for it.
 - **Flakes** — the `nightly-e2e` flake-clock state (same state file). Only entries with a night in
   the last 14 nights are listed; the rest are counted once as `older entries: K` (#964). The state
   file keeps every entry. Test names are shown repo-relative (`e2e/x.test.ts`), never as a worktree
   path, including entries recorded before that normalization existed.
-- **Runs that ended with unpushed commits** (#1024) — Runs whose `run.unpushed_commits` event
-  names commits reachable from no remote branch. The record is written when a Run COMPLETES;
-  a Run stopped by `notAfter` (`TIMED_OUT`) or failed mid-work keeps its commits in the same
-  worktree but emits nothing, so read that row's worktree before GC when a night ends badly. Each line carries the Run id, the branch it was
-  meant for, the commits and the worktree path, so the work can be recovered by hand. Mercury
-  never pushes on an agent's behalf; this section is the recovery pointer.
-- **nightly-next Runs that never called finish/blocked** (#1024) — Runs that claimed an issue
-  (`next.ts run`) and never reached a terminal call, read from the Run ledger
-  (`${XDG_STATE_HOME:-~/.local/state}/mercury/nightly/run-ledger.json`, written by `next.ts`).
-  Each line carries the Run id, the issue and the worktree path. A progress message is not an
-  exit path.
 
 Both sections are empty on a clean night, and their headings still render, so "nothing to
 report" is visibly different from "the check did not run".

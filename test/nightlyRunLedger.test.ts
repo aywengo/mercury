@@ -5,7 +5,9 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+import { mkdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 import { runNext, finishIssue, blockIssue, type NextIo } from '../.agents/skills/nightly/next.ts';
 import { loadRunLedger, recordRunClaim, recordRunTerminal, runLedgerPath, RUN_LEDGER_CAP } from '../.agents/skills/nightly/shared.ts';
@@ -123,10 +125,14 @@ test('#1024: the ledger is capped, newest entries kept', () => {
   assert.ok(runLedgerPath(env).endsWith('/mercury/nightly/run-ledger.json'));
 });
 
-test('#1024 review r1: an exit call writes only under the env it is given, never the ambient home', async () => {
+test('#1024 review r1: an exit call given an env writes under that env (the ambient-home guard is the source pin below)', async () => {
   // The blocking finding: with an `env = process.env` default, every caller that forgot the
   // argument wrote to the HOST's real ledger -- and inside a nightly Run that meant `npm test`
   // closed the Run's own claim, so the report could never list it.
+  // #1026: this test passes WITH OR WITHOUT that fix -- it calls finishIssue with an EXPLICIT
+  // env, which shadows any default, so it only proves the explicit argument is honoured. It is
+  // not the pin for "never the ambient home": that is the source assertion in the next test. If
+  // the source pin is deleted, nothing behavioural catches the reintroduced default.
   const own = tempDir('mercury-ledger-own-');
   const other = tempDir('mercury-ledger-other-');
   recordRunClaim({ XDG_STATE_HOME: own }, { runId: 'run_a', issue: 5, cwd: '/ws/a' });
@@ -139,6 +145,59 @@ test('#1024 review r1: an exit call writes only under the env it is given, never
 test('#1024 review r1: the exit paths have no process.env default', () => {
   // Pinned in source, because the failure mode is a call site that silently writes to the host's
   // ledger. A default is the mechanism; removing it is the fix.
+  // #1026: cheap guard, and it matches ONE spelling -- `env: NodeJS.ProcessEnv = process.env`
+  // in the signature. A reintroduction spelled `env?: NodeJS.ProcessEnv` with
+  // `env = env ?? process.env` in the body passes silently. Do not over-trust this pin, and do
+  // not delete it thinking the behavioural test above covers the case: it does not.
   const src = readFileSync(new URL('../.agents/skills/nightly/next.ts', import.meta.url), 'utf8');
   assert.doesNotMatch(src, /export async function (finishIssue|blockIssue)\([^)]*env: NodeJS\.ProcessEnv = process\.env/);
+});
+
+test('#1026: concurrent ledger writers do not drop writes on a shared temp file', async () => {
+  // #1026 item 4: the temp name was a fixed `${p}.tmp`. Two `next.ts` processes on one state home
+  // raced that file, and the loser's renameSync threw ENOENT into the catch -- the claim or
+  // terminal call was silently dropped. The per-pid temp name makes the rename own-writer-only.
+  //
+  // The race is between PROCESSES: saveRunLedger is fully synchronous, so one process cannot
+  // interleave with itself. This spawns two real writers released by a barrier (the
+  // crossProcess.test.ts pattern) and asserts on their failure counters: with a shared temp
+  // name, a colliding rename ENOENTs and the writer reports failed > 0.
+  //
+  // Last-writer-wins on the read-modify-write is a separate property (no lock, by design), so
+  // the assertions are that no write is DROPPED and the file stays a valid ledger -- not that
+  // every entry of both writers survives.
+  const stateHome = tempDir('mercury-ledger-race-');
+  const barrier = join(stateHome, 'barrier');
+  mkdirSync(barrier, { recursive: true });
+  const writers = 2;
+  const perWriter = 120;
+  const children = [];
+  for (let i = 0; i < writers; i++) {
+    children.push(spawn(process.execPath, [join(import.meta.dirname, 'fixtures', 'ledger-writer.ts'), stateHome, String(perWriter), barrier], {
+      env: { ...process.env, BARRIER_EXPECT: String(writers) },
+    }));
+  }
+  const settled = await Promise.all(
+    children.map(async (child, i) => {
+      let stdout = '';
+      let stderr = '';
+      child.stdout.setEncoding('utf8');
+      child.stderr.setEncoding('utf8');
+      child.stdout.on('data', (d: string) => { stdout += d; });
+      child.stderr.on('data', (d: string) => { stderr += d; });
+      const status = await new Promise<number | null>((resolve) => child.once('close', resolve));
+      const line = stdout.trim().split('\n').filter(Boolean).pop();
+      if (!line) throw new Error(`writer ${i} produced no output (status ${status}): ${stderr.slice(0, 500)}`);
+      return JSON.parse(line) as { pid: number; ok: boolean; cycles: number; failed: number; error?: string };
+    }),
+  );
+  for (const r of settled) {
+    assert.ok(r.ok, `writer ${r.pid} crashed: ${r.error}`);
+    assert.equal(r.failed, 0, `writer ${r.pid} dropped ${r.failed} of ${r.cycles} ledger writes (shared temp file race)`);
+  }
+  // The file on disk must still be a valid, well-formed ledger: no torn or cross-writer-corrupted
+  // JSON. A corrupt file reads as an EMPTY ledger (shape-validated read), so non-empty is the
+  // parse-and-validate proof.
+  const ledger = loadRunLedger({ XDG_STATE_HOME: stateHome });
+  assert.ok(ledger.length > 0, 'the ledger is a valid non-empty file after the race');
 });

@@ -38,6 +38,9 @@ Record: [`docs/host-installer.md`](docs/host-installer.md)
 | #636 | M5: lifecycle — mercury host status/upgrade/uninstall + re-run guard | done | #637 |
 | #638 | M6: release hardening — bats suite, installer CI matrix, checksum, install docs | done | #639 |
 | #929 | Host installer: the four "gate open" milestones (M1, M3, M4, M6) are verification work… | open | — |
+| #1071 | host service install writes a host unit with no worker: a fresh host queues Runs forever | done | #1072 |
+| #1074 | a fresh host cannot run: the service units drop the user bin from PATH, and nothing creates the data directory | done | #1075 |
+| #1078 | workflows are unreachable on a running host: the registry is never built, and there is no per-host directory | done | #1079 |
 | #1029 | release: the formula push to main is refused by the ruleset, so every release leaves Homebrew… | done | #1046 |
 | #1045 | release: a failed curl probe yields HTTP 000000 in the release notes (and the test stub hides it) | done | #1047 |
 
@@ -60,10 +63,13 @@ Record: [`docs/nightly-self-development.md`](docs/nightly-self-development.md)
 | #968 | nightly: resume PRs on the owner's changes-requested review, not only on Copilot findings | done | #969 |
 | #980 | nightly: resume its own PRs when the required ci check is red, not only on reviews | in progress | #981 |
 | #1020 | nightly: nothing notices a night with no report (host down 2026-10-19→20) | done | #1021 |
+| #1015 | nightly: resume its own PRs when the head is conflicted with main | open | — |
+| #1092 | nightly report: a "Waiting on you" section for nightly PRs with no review on their current head | open | — |
 | #1023 | URGENT nightly host runs Mercury 0.2.0/0.2.1: stale skills; resume Runs commit but never push | done | — |
 | #1024 | nightly: flag Runs that end with unpushed commits or without finish/blocked; report the loaded skill version | done | #1025 |
-| #1026 | nightly: #1024 follow-ups from the #1025 round-2 review (scan budget, host-wide unpushed section, ledger temp race, doc drift) | open | — |
+| #1026 | nightly: #1024 follow-ups from the #1025 round-2 review (scan budget, host-wide unpushed section, ledger temp race, doc drift) | done | #1082 |
 | #1001 | nightly: a claim whose Run ended with no PR and no comment is never released; rung 2 claims work with no ready signal | done | #1009 |
+| #1086 | e2e: the harness never imports product code -- fleetBots.test.ts imports test/helpers.ts | untracked | — |
 
 ## Dispatcher bots
 
@@ -85,7 +91,7 @@ Record: [`docs/dispatcher-bot-design.md`](docs/dispatcher-bot-design.md)
 | #908 | dispatcher B2-2: trigger storm guards — includeBotRuns, chain depth, both cooldowns, AP… | open | — |
 | #909 | dispatcher B2-3: the observer scope — a third posture in AuthContext, read-only across… | open | — |
 | #912 | dispatcher B3: the LLM brain — LLMConnection, closed action vocabulary, budgets, script… | open | — |
-| #915 | dispatcher B4: setup integration and hardening — host setup bots step, host doctor bots… | open | — |
+| #915 | dispatcher B4: setup integration and hardening — host setup bots step, host doctor bots… | done | #1070 |
 
 ## Crew — Milestone A follow-ups
 
@@ -179,8 +185,9 @@ Record: [`docs/fleet-bots-design.md`](docs/fleet-bots-design.md)
 | #970 | Fleet: per-host availability snapshot and a read-only view (FB0) | done | #978 |
 | #971 | Fleet: owner-scoped, paged `GET /fleet/runs` (FB2a) | done | #982 |
 | #972 | Fleet: availability-aware routing filter (FB1) | done | #1002 |
-| #973 | Bots: `FleetSchedulerClient` and `api.via: "fleet"` (FB2b) | open | — |
-| #974 | End to end: a bot on host A dispatches through Fleet to host B (FB3) | open | — |
+| #973 | Bots: `FleetSchedulerClient` and `api.via: "fleet"` (FB2b) | done | #1016 |
+| #974 | End to end: a bot on host A dispatches through Fleet to host B (FB3) | done | #1081 |
+| #1080 | `GET /api/workflows` omits `enabled`, so Fleet refuses every workflow Run on every host | done | #1081 |
 
 ## Fleet tenancy
 
@@ -216,6 +223,7 @@ on Mercury's own Express app, so A1 can start.
 | #988 | Server-stamped Run origin: a field no request body can set (A0-3) | done | #996 |
 | #990 | Pure Run-chain → A2A TaskState mapping, exhaustive over RunStatus (A0-4) | done | #998 |
 | #989 | Exposed-skill config, create-Run validation of every template, `host a2a validate` (A0-5) | open | — |
+| #999 | release: the A2A SDK optional gRPC peer adds 39 packages to every install | open | — |
 | #1030 | test: a2aServer section 6.6 blocking-bound test is timing-flaky and can block a release PR | done | #1039 |
 | #1040 | nightly: a crashed model server still lets the Run claim an issue, so the night ends with 17 failed Runs and stale claims | done | #1041 |
 | #1042 | nightly report: a model outage makes the digest say _none_ everywhere, so a lost night reads as a quiet one | done | #1043 |
@@ -233,6 +241,7 @@ Record: [`docs/status.md`](docs/status.md)
 | #942 | security: GitHub revoked the nightly GH_TOKEN ('mercury-pat') after a PR-description le… | done | — |
 | #944 | redactor: session transcripts and kernel-state snapshots store Run secrets unredacted | done | #965 |
 | #976 | artifact redaction: sweep workspaces of runs the worker never finalized | open | — |
+| #1012 | worker: retry never resumes for hermes/claude/local (resume() throws on the retry run id) | open | — |
 | #1060 | security: nightly Runs filed issues as the operator — the profile's token file held the operator's PAT, not the bot's (CP-4 was working; the tool shell had the Run's GH_CONFIG_DIR and GH_TOKEN) | done | #1061, #1062, #1063 |
 
 ## Release workflow

@@ -32,6 +32,7 @@ import { join } from 'node:path';
 import { LayaClient } from '../laya/client.ts';
 import { validateLayaBaseUrl } from '../laya/layaUrl.ts';
 import { readLayaCredentials } from './layaCredentials.ts';
+import { checkBots, type BotsDoctorResult } from './bots/doctor.ts';
 
 /** Load mercury.env into a record (simple KEY=VALUE parser, no shell semantics). */
 export function loadEnvFile(path: string): Record<string, string> {
@@ -87,6 +88,8 @@ export interface DoctorResult {
   /** The worker user's own GitHub credentials (#1060). A warning, never a failure: the host is
    *  usable, but a Run's tool shell can act as that account. */
   agentCredentials?: AgentCredentialRisk;
+  /** The bots section (§13, B4). Absent when no bot is configured — absence is the default. */
+  bots?: BotsDoctorResult;
 }
 
 /** Bounded GET with a timeout. Returns { status, body } or an error detail. */
@@ -450,8 +453,12 @@ export async function runHostDoctor(
       }
     }
   }
+  // Bots (§13, B4): one line per configured alias, each check bounded and fail-closed. No bots
+  // configured → no section at all, like the laya line.
+  const botsChecked = await checkBots({ env, vars, envFilePath: file });
+  const bots = botsChecked.bots.length > 0 || botsChecked.envFileMode !== undefined ? botsChecked : undefined;
   const agentCredentials = checkAgentCredentials();
-  const result: DoctorResult = { healthz, bindHealthz, smoke, allSmokeSkipped: anySkipped, noHarnesses, agentCredentials, ...(laya !== undefined ? { laya } : {}) };
+  const result: DoctorResult = { healthz, bindHealthz, smoke, allSmokeSkipped: anySkipped, noHarnesses, agentCredentials, ...(bots !== undefined ? { bots } : {}), ...(laya !== undefined ? { laya } : {}) };
   if (json) {
     io.out(JSON.stringify(result, null, 2) + '\n');
   } else {
@@ -467,6 +474,14 @@ export async function runHostDoctor(
     }
     for (const s of smoke) {
       io.out(`smoke ${s.harness}: ${s.ok ? 'PASS' : 'FAIL'} — ${s.detail}\n`);
+    }
+    if (bots) {
+      for (const b of bots.bots) {
+        io.out(`bot ${b.alias}: ${b.ok ? 'PASS' : 'FAIL'} — ${b.detail}\n`);
+      }
+      if (bots.envFileMode) {
+        io.out(`bots: ${bots.envFileMode.ok ? 'PASS' : 'FAIL'} — ${bots.envFileMode.detail}\n`);
+      }
     }
     if (noHarnesses) {
       io.out(
@@ -491,6 +506,6 @@ export async function runHostDoctor(
   // skipped" verifies nothing while reading as success. Partial skips still pass.
   // The same class for #654: an empty MERCURY_HARNESSES verifies nothing by
   // configuration. It fails unless --allow-no-harnesses says the host runs none.
-  const allOk = healthz.ok && (bindHealthz ? bindHealthz.ok : true) && smoke.every((s) => s.ok || s.skipped) && !anySkipped && !(noHarnesses && !allowNoHarnesses) && (laya === undefined || laya.ok);
+  const allOk = healthz.ok && (bindHealthz ? bindHealthz.ok : true) && smoke.every((s) => s.ok || s.skipped) && !anySkipped && !(noHarnesses && !allowNoHarnesses) && (laya === undefined || laya.ok) && (bots === undefined || bots.ok);
   return allOk ? 0 : 1;
 }
