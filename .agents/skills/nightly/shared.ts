@@ -218,3 +218,48 @@ export function ghPatch(path: string, body: unknown, token: string): Promise<{ b
 export function ghDelete(path: string, token: string): Promise<{ body: unknown; status: number; link?: string | null }> {
   return ghFetch('DELETE', path, token);
 }
+
+/**
+ * Plain-text GET for endpoints whose response is not JSON — the Actions job log,
+ * `GET /repos/{owner}/{repo}/actions/jobs/{job_id}/logs`, which 302-redirects to a signed URL
+ * that node's fetch follows (verified 2026-11-01 against a live run). Bounded twice, like every
+ * nightly fetch: FETCH_TIMEOUT_MS on the request (the abort also cuts a slow body stream), and
+ * the BODY read stops at maxBytes — the log is truncated, the response dropped — so a hung or
+ * oversized log cannot grow memory or the selector's wall clock. A fetch failure (network, DNS,
+ * timeout, unreadable body) yields null; non-2xx responses are returned with their status so the
+ * caller owns the policy.
+ */
+export async function ghGetText(path: string, token: string, maxBytes: number): Promise<{ status: number; text: string } | null> {
+  let res: Response;
+  try {
+    res = await fetch(`https://api.github.com${path}`, {
+      method: 'GET',
+      headers: { ...GH_HEADERS, authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    });
+  } catch {
+    return null;
+  }
+  const limit = Math.max(1, maxBytes);
+  let text = '';
+  try {
+    if (res.body) {
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder('utf-8');
+      let bytes = 0;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        text += decoder.decode(value, { stream: true });
+        bytes += value.byteLength;
+        if (bytes >= limit) break; // cap hit: keep what we have, drop the rest
+      }
+      await res.body.cancel().catch(() => {});
+    } else {
+      text = await res.text();
+    }
+  } catch {
+    return null;
+  }
+  return { status: res.status, text: text.length > limit ? text.slice(0, limit) : text };
+}

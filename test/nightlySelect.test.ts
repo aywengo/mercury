@@ -1520,7 +1520,11 @@ test('a failed release COMMENT still makes the issue selectable (label-first, #1
 function redCiIo(opts: {
   ciStatus?: string;
   ciConclusion?: string | null;
-  failingJobs?: { name: string; output?: string }[];
+  /** A failing sibling job of the `ci` aggregate. `externalId` is the Actions job id; `log`
+   *  is the job log the known-flake guard reads (a job without `externalId` has no readable
+   *  log — a real failure). `logStatus` overrides the fetch status; `logError` makes the
+   *  transport throw. */
+  failingJobs?: { name: string; conclusion?: string; externalId?: string; log?: string; logStatus?: number; logError?: boolean }[];
   ownerReviews?: { state: string; commit_id: string }[];
   copilotThreads?: number;
   extraReadyIssue?: boolean;
@@ -1533,7 +1537,7 @@ function redCiIo(opts: {
   if (opts.extraReadyIssue) issues.push(issue({ number: 975, user: { login: 'aywengo' }, labels: [{ name: 'nightly:ready' }, { name: 'priority: high' }] }));
   const checkRuns = [
     { name: 'ci', status: opts.ciStatus ?? 'completed', conclusion: opts.ciConclusion === undefined ? 'failure' : opts.ciConclusion },
-    ...(opts.failingJobs ?? []).map((j) => ({ name: j.name, status: 'completed', conclusion: 'failure', output: { text: j.output ?? '' } })),
+    ...(opts.failingJobs ?? []).map((j) => ({ name: j.name, status: 'completed', conclusion: j.conclusion ?? 'failure', ...(j.externalId !== undefined ? { external_id: j.externalId } : {}) })),
     { name: 'changes', status: 'completed', conclusion: 'success' },
   ];
   return {
@@ -1547,6 +1551,14 @@ function redCiIo(opts: {
       }
       if (path.includes('/check-runs?')) return { body: { check_runs: checkRuns }, link: null };
       return { body: issues, link: null };
+    },
+    async getText(path: string) {
+      const m = path.match(/\/actions\/jobs\/(\d+)\/logs$/);
+      if (!m) return null;
+      const job = (opts.failingJobs ?? []).find((j) => j.externalId === m[1]);
+      if (job?.logError) throw new Error('log fetch failed');
+      if (!job || job.log === undefined) return { status: 404, text: 'Not Found' };
+      return { status: job.logStatus ?? 200, text: job.log };
     },
     async post() { return true; },
     async postJson() {
@@ -1571,6 +1583,33 @@ test('#980: a nightly PR whose head has red ci resumes on the CI signal, reason 
   assert.match(s.reason, /red ci on head sha965/);
   assert.match(s.reason, /test \(node 22\.18\.0\)/);
   assert.match(s.reason, /plan-tracker/);
+});
+
+test('#980: a head whose failing job concluded timed_out is selected at rung 0', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const s = await runSelectorWith(redCiIo({
+    failingJobs: [{ name: 'test (node 22.18.0)', conclusion: 'timed_out' }],
+  }) as never, { REPO: 'aywengo/mercury' }, true);
+  assert.equal(s.rung, 0, 'a timed-out job leaves a red head the bot must come back to');
+  assert.equal(s.issue, 965);
+  assert.match(s.reason, /test \(node 22\.18\.0\)/);
+});
+
+test('#980: a head whose failing job concluded cancelled is selected at rung 0', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const s = await runSelectorWith(redCiIo({
+    failingJobs: [{ name: 'uninstall', conclusion: 'cancelled' }],
+  }) as never, { REPO: 'aywengo/mercury' }, true);
+  assert.equal(s.rung, 0, 'a cancelled job leaves a red head the bot must come back to');
+  assert.match(s.reason, /uninstall/);
+});
+
+test('#980: a failed aggregate with no nameable sibling job still resumes (unknown job)', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const s = await runSelectorWith(redCiIo({ failingJobs: [] }) as never, { REPO: 'aywengo/mercury' }, true);
+  assert.equal(s.rung, 0, 'the failed aggregate itself is the signal');
+  assert.equal(s.issue, 965);
+  assert.match(s.reason, /red ci on head sha965: unknown job/);
 });
 
 test('#980: a `ci` check still in progress is not a signal', async () => {
@@ -1630,8 +1669,8 @@ test('#980: a PR authored by someone else with red ci is not selected', async ()
   assert.notEqual(s.rung, 0, 'red ci on a foreign PR is not nightly resume work');
 });
 
-test('#980: a failure confined to a known flake does not trigger a red-ci resume', async () => {
-  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+/** A temp XDG_STATE_HOME whose flake clock records 'e2e/retries a flaky request'. */
+async function flakeHome(): Promise<string> {
   const { writeFileSync, mkdirSync } = await import('node:fs');
   const { join } = await import('node:path');
   const { tempDir } = await import('./helpers.ts');
@@ -1640,30 +1679,113 @@ test('#980: a failure confined to a known flake does not trigger a red-ci resume
   writeFileSync(join(home, 'mercury', 'nightly', 'e2e-flakes.json'), JSON.stringify({
     fp1: { test: 'e2e/retries a flaky request', error: 'timeout', nights: ['2026-10-16'] },
   }));
+  return home;
+}
+
+test('#980: a failure confined to a known flake does not trigger a red-ci resume', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const home = await flakeHome();
+  // The exemption is decided from the failed job's LOG, not the job name or the check-run
+  // output fields (#980 review r2).
   const s = await runSelectorWith(redCiIo({
-    failingJobs: [{ name: 'test (node 22.18.0)', output: '✖ e2e/retries a flaky request (12.3ms)' }],
+    failingJobs: [{ name: 'test (node 22.18.0)', externalId: '9001', log: '✖ e2e/retries a flaky request (12.3ms)' }],
   }) as never, { REPO: 'aywengo/mercury', XDG_STATE_HOME: home }, true);
   assert.notEqual(s.rung, 0, 'a known-flake-only red head waits for a human review instead of looping');
 });
 
 test('#980: a real failure next to a known flake still resumes', async () => {
   const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
-  const { writeFileSync, mkdirSync } = await import('node:fs');
-  const { join } = await import('node:path');
-  const { tempDir } = await import('./helpers.ts');
-  const home = tempDir('nightly-flake-');
-  mkdirSync(join(home, 'mercury', 'nightly'), { recursive: true });
-  writeFileSync(join(home, 'mercury', 'nightly', 'e2e-flakes.json'), JSON.stringify({
-    fp1: { test: 'e2e/retries a flaky request', error: 'timeout', nights: ['2026-10-16'] },
-  }));
+  const home = await flakeHome();
   const s = await runSelectorWith(redCiIo({
     failingJobs: [
-      { name: 'test (node 22.18.0)', output: '✖ e2e/retries a flaky request (12.3ms)' },
+      { name: 'test (node 22.18.0)', externalId: '9001', log: '✖ e2e/retries a flaky request (12.3ms)' },
       { name: 'plan-tracker' },
     ],
   }) as never, { REPO: 'aywengo/mercury', XDG_STATE_HOME: home }, true);
   assert.equal(s.rung, 0, 'the plan-tracker failure is real work');
   assert.match(s.reason, /plan-tracker/);
+});
+
+test('#980: a flake plus a real failure in the SAME job resumes', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const home = await flakeHome();
+  const s = await runSelectorWith(redCiIo({
+    failingJobs: [{
+      name: 'test (node 22.18.0)',
+      externalId: '9001',
+      log: [
+        '✖ e2e/retries a flaky request (12.3ms)',
+        '✖ e2e/schema rejects bad json (15.0ms)',
+        'ℹ fail 2',
+        '',
+        '✖ failing tests:',
+        '',
+        'test at e2e/retries.test.ts:8:1',
+        '✖ e2e/retries a flaky request (12.3ms)',
+        '  AssertionError: expected 200 to be 429',
+      ].join('\n'),
+    }],
+  }) as never, { REPO: 'aywengo/mercury', XDG_STATE_HOME: home }, true);
+  assert.equal(s.rung, 0, 'one real failure next to the flake in the same log resumes');
+  assert.match(s.reason, /test \(node 22\.18\.0\)/);
+});
+
+test('#980: an unreadable job log is a real failure and resumes', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  // (a) the log endpoint answers non-2xx
+  const s = await runSelectorWith(redCiIo({
+    failingJobs: [{ name: 'test (node 22.18.0)', externalId: '9001', logStatus: 404 }],
+  }) as never, { REPO: 'aywengo/mercury' }, true);
+  assert.equal(s.rung, 0, 'a 404 job log is treated as real, never as a flake');
+  // (b) the transport throws
+  const s2 = await runSelectorWith(redCiIo({
+    failingJobs: [{ name: 'test (node 22.18.0)', externalId: '9001', logError: true }],
+  }) as never, { REPO: 'aywengo/mercury' }, true);
+  assert.equal(s2.rung, 0, 'a thrown log fetch is treated as real');
+  // (c) no external_id: not an Actions job, there is no log to read
+  const s3 = await runSelectorWith(redCiIo({
+    failingJobs: [{ name: 'test (node 22.18.0)' }],
+  }) as never, { REPO: 'aywengo/mercury' }, true);
+  assert.equal(s3.rung, 0, 'a job without an Actions id has no readable log');
+});
+
+test('#980: a job log in the raw Actions shape still classifies (line prefix, ##[] markers)', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const home = await flakeHome();
+  // Every line of an Actions job log carries a `<ts>Z ` prefix; the runner's own `##[group]`
+  // and `##[error]` lines are not test names.
+  const log = [
+    '2026-11-01T00:31:02.1234567Z ##[group]Run npm test',
+    '2026-11-01T00:31:02.2345678Z > mercury@0.2.7 test',
+    '2026-11-01T00:31:03.3456789Z ✖ e2e/retries a flaky request (12.3ms)',
+    '2026-11-01T00:31:03.4567890Z ℹ fail 1',
+    '2026-11-01T00:31:03.5678901Z ##[error]Process completed with exit code 1.',
+  ].join('\n');
+  const s = await runSelectorWith(redCiIo({
+    failingJobs: [{ name: 'test (node 22.18.0)', externalId: '9001', log }],
+  }) as never, { REPO: 'aywengo/mercury', XDG_STATE_HOME: home }, true);
+  assert.notEqual(s.rung, 0, 'the Actions line prefix must not hide the flake names');
+});
+
+test('#980: failingTestMentions reads the marker through the Actions log line prefix', async () => {
+  const { failingTestMentions } = await import('../.agents/skills/nightly/select.ts');
+  const log = [
+    '2026-11-01T00:31:02.1234567Z ##[group]Run npm test',
+    '2026-11-01T00:31:03.2345678Z ✖ e2e/retries a flaky request (12.3ms)',
+    '2026-11-01T00:31:03.3456789Z not ok 5 - does the thing',
+    '2026-11-01T00:31:03.4567890Z ##[error]Process completed with exit code 1.',
+    '2026-11-01T00:31:03.5678901Z ✖ failing tests:',
+  ].join('\n');
+  assert.deepEqual(failingTestMentions(log), ['e2e/retries a flaky request', 'does the thing']);
+});
+
+test('#980: fetchJobLog returns null for a missing transport, a bad id or a non-2xx', async () => {
+  const { fetchJobLog } = await import('../.agents/skills/nightly/select.ts');
+  assert.equal(await fetchJobLog({}, 'aywengo/mercury', undefined), null, 'no getText: no log');
+  assert.equal(await fetchJobLog({ async getText() { return { status: 200, text: 'x' }; } }, 'aywengo/mercury', 'not-a-number'), null, 'a non-numeric id is not a job log');
+  assert.equal(await fetchJobLog({ async getText() { return { status: 404, text: 'Not Found' }; } }, 'aywengo/mercury', '123'), null, 'non-2xx is no log');
+  const ok = await fetchJobLog({ async getText(p: string) { return { status: 200, text: `log of ${p}` }; } }, 'aywengo/mercury', '123');
+  assert.equal(ok, 'log of /repos/aywengo/mercury/actions/jobs/123/logs');
 });
 
 test('#980: ladder ordering puts owner changes first, then red ci, then Copilot findings', () => {
@@ -1698,6 +1820,53 @@ test('#980: redCiJobs pulls the failing job names under the required aggregate c
   assert.equal(redCiJobs([{ name: 'ci', status: 'in_progress', conclusion: null }]), null, 'in progress is not a signal');
   assert.equal(redCiJobs([{ name: 'ci', status: 'completed', conclusion: 'success' }]), null, 'green is not a signal');
   assert.equal(redCiJobs([{ name: 'test (node 24.x)', status: 'completed', conclusion: 'failure' }]), null, 'no aggregate check: no signal');
+  // A job that timed out or was cancelled is a FAILING job: its unsuccessful conclusion does
+  // not mean "wait" — only a still-running or unknown conclusion does (#980 review r1).
+  assert.deepEqual(redCiJobs([
+    { name: 'ci', status: 'completed', conclusion: 'failure' },
+    { name: 'test (node 22.18.0)', status: 'completed', conclusion: 'timed_out' },
+  ]), ['test (node 22.18.0)'], 'a timed-out job is a failing job');
+  assert.deepEqual(redCiJobs([
+    { name: 'ci', status: 'completed', conclusion: 'failure' },
+    { name: 'uninstall', status: 'completed', conclusion: 'cancelled' },
+  ]), ['uninstall'], 'a cancelled job is a failing job');
+  assert.deepEqual(redCiJobs([
+    { name: 'ci', status: 'completed', conclusion: 'failure' },
+    { name: 'changes', status: 'completed', conclusion: 'success' },
+  ]), [], 'failed aggregate, no nameable sibling: still a signal (the caller reports unknown job)');
+});
+
+test('#980: failingTestMentions parses only the failing-test markers of a full spec report', async () => {
+  const { failingTestMentions } = await import('../.agents/skills/nightly/select.ts');
+  // The full shape node --test prints (the shape test/nightlyE2e.test.ts represents, extended
+  // with suite headings): suite lines, inline failures, the ℹ summary lines, the `✖ failing
+  // tests:` heading and the detail blocks. Exactly the real failing test names come out — the
+  // heading, the ▶ lines and the ℹ lines are not test names (#980 review r3).
+  const log = [
+    '▶ e2e/retries.test.ts',
+    '✔ e2e/retries a known good request (1.1ms)',
+    '✖ e2e/retries a flaky request (12.3ms)',
+    '▶ e2e/schema.test.ts',
+    '✖ e2e/schema rejects bad json (2.1ms)',
+    'ℹ tests 4',
+    'ℹ suites 2',
+    'ℹ pass 1',
+    'ℹ fail 2',
+    'ℹ cancelled 0',
+    '',
+    '✖ failing tests:',
+    '',
+    'test at e2e/retries.test.ts:8:1',
+    '✖ e2e/retries a flaky request (12.3ms)',
+    '  AssertionError: expected 200 to be 429',
+    '',
+    'test at e2e/schema.test.ts:5:1',
+    '✖ e2e/schema rejects bad json (2.1ms)',
+    "  SyntaxError: Unexpected token '{'",
+  ].join('\n');
+  assert.deepEqual(failingTestMentions(log), ['e2e/retries a flaky request', 'e2e/schema rejects bad json']);
+  // TAP shape: the not-ok lines are the names, deduplicated.
+  assert.deepEqual(failingTestMentions('not ok 3 - does the thing\nnot ok 7 - does the thing\nok 1 - works (1ms)\n'), ['does the thing']);
 });
 
 test('#980: a capped check-runs scan fails the red-ci signal closed (no resume, issue stays reserved)', async () => {

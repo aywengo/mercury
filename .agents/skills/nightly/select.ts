@@ -50,7 +50,7 @@
 
 import { basename } from 'node:path';
 import { readFileSync } from 'node:fs';
-import { REPO_RE, CLAIM_RELEASED_MARKER, ghToken, ghGet as ghGetRaw, ghPost as ghPostRaw, ghDelete as ghDeleteRaw, FETCH_TIMEOUT_MS } from './shared.ts';
+import { REPO_RE, CLAIM_RELEASED_MARKER, ghToken, ghGet as ghGetRaw, ghGetText, ghPost as ghPostRaw, ghDelete as ghDeleteRaw, FETCH_TIMEOUT_MS } from './shared.ts';
 
 const TRUSTED_AUTHOR = 'aywengo';
 /** The hosted Copilot reviewer's exact login (aywengo/mercury reviews). Exact match everywhere:
@@ -139,42 +139,58 @@ export interface CheckRunShim {
   name?: string | null;
   status?: string | null;
   conclusion?: string | null;
-  output?: { summary?: string | null; text?: string | null } | null;
+  /** The Actions job id behind the check run (numeric as a string): the key to the job log the
+   *  known-flake guard reads (#980 review r2). Absent on non-Actions checks. */
+  external_id?: string | null;
 }
+
+/** Conclusions that mean a job did NOT succeed but also do NOT mean "wait" (#980 review r1):
+ * a plain failure, a timeout (the job hit the CI limit and the `ci` aggregate still completes
+ * with `failure`) or a cancellation. A check still running, or with an unknown conclusion, is
+ * not in this set: those mean wait for the verdict. */
+export const FAILING_CONCLUSIONS: readonly string[] = ['failure', 'timed_out', 'cancelled'];
 
 /**
  * The failing job names under the required aggregate check on one head, or null when there is
  * NO signal: the aggregate check absent, still running (wait for the verdict, acceptance 2), or
  * not failed. Only a COMPLETED aggregate with conclusion `failure` is a red-CI resume signal
- * (#980); the failing jobs are the OTHER check runs with conclusion `failure` on the same head.
+ * (#980); the failing jobs are the OTHER check runs with a failing conclusion on the same head
+ * — a job that timed out or was cancelled is a failing job too, and its name belongs in the
+ * selection reason (#980 review r1). An EMPTY list is also a signal: the aggregate failed but
+ * no sibling job could be named — the caller reports it as `unknown job`, it never waits.
  */
 export function redCiJobs(checkRuns: CheckRunShim[]): string[] | null {
   const ci = checkRuns.find((c) => c.name === RED_CI_CHECK);
   if (!ci || ci.status !== 'completed' || ci.conclusion !== 'failure') return null;
   return checkRuns
-    .filter((c) => c.name !== undefined && c.name !== null && c.name !== RED_CI_CHECK && c.conclusion === 'failure')
+    .filter((c) => c.name !== undefined && c.name !== null && c.name !== RED_CI_CHECK && FAILING_CONCLUSIONS.includes(c.conclusion ?? ''))
     .map((c) => c.name!);
 }
 
 /**
- * Failing-test names mentioned in a check run's output: node --test's spec reporter marks a
- * failure line `✖ <name> (<duration>)`; TAP marks it `not ok <n> - <name>`. Used only for the
- * known-flake guard (#980 acceptance 5) — a job whose every named failing test is a recorded
- * flake does not trigger a red-CI resume on its own.
+ * Failing-test names mentioned in reporter output: node --test's spec reporter marks a failing
+ * test `✖ <name> (<duration>)` — the duration is REQUIRED, so the reporter's own `✖ failing
+ * tests:` heading, the `▶` suite headings and the `ℹ fail N` summary lines never parse as
+ * names — and TAP marks it `not ok <n> - <name>`. Deduplicated in first-seen order. Used only
+ * for the known-flake guard (#980 acceptance 5) — a job whose every named failing test is a
+ * recorded flake does not trigger a red-CI resume on its own.
  */
 export function failingTestMentions(output: string): string[] {
   const names: string[] = [];
-  for (const line of output.split('\n')) {
-    const spec = line.match(/^\s*(?:✖|✗)\s*(.+?)(?:\s*\(\d+(?:\.\d+)?\s*m?s\))?\s*$/);
+  for (const raw of output.split('\n')) {
+    // A raw Actions job log prefixes EVERY line with `<ts>Z ` (e.g.
+    // `2026-11-01T00:31:03.2345678Z `); bare reporter output (tests, fixtures) has no prefix.
+    const line = raw.replace(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\s+/, '');
+    const spec = line.match(/^\s*(?:✖|✗)\s+(.+?)\s+\(\d+(?:\.\d+)?\s*m?s\)\s*$/);
     const tap = line.match(/^\s*not ok \d+\s*-\s*(.+?)\s*$/);
     const name = (spec?.[1] ?? tap?.[1] ?? '').trim();
-    if (name !== '') names.push(name);
+    if (name !== '' && !names.includes(name)) names.push(name);
   }
   return names;
 }
 
 /**
- * Whether one failing job's output mentions ONLY known-flake tests. A job with no extractable
+ * Whether one failing job's LOG mentions ONLY known-flake tests. A job with no extractable
  * failing-test names is a real failure (typecheck, plan-tracker and installer jobs rarely name
  * tests) — fail toward resuming, never toward ignoring red CI.
  */
@@ -210,6 +226,39 @@ export function loadFlakeTestNames(env: NodeJS.ProcessEnv, read?: (p: string) =>
     if (typeof test === 'string' && test !== '') names.push(test);
   }
   return names;
+}
+
+/** How much of one job log the selector reads (the known-flake guard scans line by line; the
+ * failing-test markers of an `npm test` run sit far inside this cap). */
+export const JOB_LOG_MAX_BYTES = 2 * 1024 * 1024;
+
+/**
+ * The bounded log of the failed Actions job behind a check run (#980 review r2): the known-flake
+ * exemption is decided from the failing test names taken from the failed job's LOG — the job
+ * name or the check run's output fields alone cannot name the failing tests. An unreadable log
+ * is a REAL failure: the caller resumes, it does not excuse the head.
+ *
+ * `externalId` is the Actions job id (the check run's `external_id`); the log endpoint
+ * 302-redirects to a signed URL and node's fetch follows it (verified 2026-11-01). Bounds:
+ * FETCH_TIMEOUT_MS per fetch and JOB_LOG_MAX_BYTES of text. null = no log (missing transport,
+ * non-numeric id, fetch failure, non-2xx) — the caller treats that as a real failure.
+ */
+export async function fetchJobLog(
+  io: { getText?: (path: string) => Promise<{ status: number; text: string } | null> },
+  repo: string,
+  externalId: unknown,
+): Promise<string | null> {
+  if (!io.getText) return null;
+  if (typeof externalId !== 'string' && typeof externalId !== 'number') return null;
+  const jobId = String(externalId);
+  if (!/^\d+$/.test(jobId)) return null; // an Actions job id is numeric; anything else has no job log here
+  try {
+    const res = await io.getText(`/repos/${repo}/actions/jobs/${jobId}/logs`);
+    if (res === null || res.status < 200 || res.status >= 300) return null;
+    return res.text.length > JOB_LOG_MAX_BYTES ? res.text.slice(0, JOB_LOG_MAX_BYTES) : res.text;
+  } catch {
+    return null;
+  }
 }
 
 export function issueLabels(issue: GhIssue): string[] {
@@ -622,6 +671,11 @@ export async function runSelectorWith(
      *  Optional: ABSENT means the pending-findings check cannot run, so resume candidates
      *  fail closed (no resume) while their issues stay reserved from new work. */
     postJson?: (path: string, body: unknown) => Promise<{ body: unknown; status: number }>;
+    /** Plain-text GET (the Actions job log, which redirects to a signed URL and is not JSON).
+     *  Optional: ABSENT means no job log can be fetched, so the known-flake guard cannot
+     *  exonerate a failing job — every failing job is a real failure and the red-CI resume
+     *  fires (fail toward resuming, #980 review r2). */
+    getText?: (path: string) => Promise<{ status: number; text: string } | null>;
   },
   env: NodeJS.ProcessEnv,
   dryRun: boolean,
@@ -951,7 +1005,8 @@ export async function runSelectorWith(
         }
         // Red CI on the CURRENT head (#980): the required aggregate check completed with
         // conclusion failure. Check runs are GitHub metadata (names, statuses, conclusions and
-        // the failing job's output text for the known-flake guard) — never PR or comment text.
+        // the Actions job id) — never PR or comment text. The known-flake guard reads the
+        // failing job's LOG through that id (#980 review r2).
         // A capped or failed scan fails closed for this PR's red-ci signal only: the Copilot
         // review logic below still runs, and the issue stays reserved from new work either way.
         {
@@ -974,16 +1029,28 @@ export async function runSelectorWith(
           }
           if (crComplete) {
             const failing = redCiJobs(checkRuns);
-            if (failing !== null && failing.length > 0) {
+            if (failing !== null) {
               const flakeTests = loadFlakeTestNames(env);
               const byName = new Map(checkRuns.filter((c) => typeof c.name === 'string').map((c) => [c.name!, c]));
-              const real = failing.filter((job) => {
+              // The flake exemption is decided per job from the failed job's LOG (#980 review
+              // r2): the job name or the check-run output fields alone cannot name the failing
+              // tests. An unreadable log (no Actions id, no getText, fetch failure, non-2xx) is
+              // a real failure — the job stays in, fail toward resuming.
+              const real: string[] = [];
+              for (const job of failing) {
                 const run = byName.get(job);
-                const output = `${run?.output?.summary ?? ''}\n${run?.output?.text ?? ''}`;
-                return !isFlakeConfinedJob(output, flakeTests);
-              });
-              if (real.length > 0) {
-                resume.push({ issue, prNumber: pr.number, headSha, state: 'red-ci', createdAt: pr.created_at ?? '', failingJobs: real.join(', ') });
+                const log = await fetchJobLog(io, repo, run?.external_id);
+                if (log !== null && isFlakeConfinedJob(log, flakeTests)) {
+                  console.error(`resume scan: PR #${pr.number} job '${job}' confined to known flakes; not a signal on its own`);
+                } else {
+                  real.push(job);
+                }
+              }
+              // An empty `failing` list is the failed aggregate itself: no sibling job could be
+              // named, and that is still a red head (reported as `unknown job`) — never a wait
+              // (#980 review r1).
+              if (real.length > 0 || failing.length === 0) {
+                resume.push({ issue, prNumber: pr.number, headSha, state: 'red-ci', createdAt: pr.created_at ?? '', failingJobs: real.length > 0 ? real.join(', ') : undefined });
                 continue;
               }
               // Every failing job is confined to known flakes (#980 acceptance 5): not a
@@ -1117,6 +1184,7 @@ export async function runSelector(repo: string, env: NodeJS.ProcessEnv, dryRun: 
   return runSelectorWith(
     {
       get: async (path) => await ghGet(path, token),
+      getText: async (path) => await ghGetText(path, token, JOB_LOG_MAX_BYTES),
       post: (path, body) => ghPost(path, body, token),
       postJson: async (path, body) => await ghPostRaw(path, body, token),
       del: async (path) => {

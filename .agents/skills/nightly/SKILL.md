@@ -201,9 +201,15 @@ search and reports without creating.
 - **`fix-loop` on rung 0 (resume, #819)**: the claimed issue already has an open nightly PR
   whose head carries Copilot findings, whose head carries @aywengo's changes-requested review
   (#968; owner reviews resume first), or whose head has red CI (#980): the required `ci` check
-  completed with conclusion `failure`, with the failing job names in the selection reason (a
-  check still in progress is not a signal; a failure confined to a known flake from the
-  nightly-e2e flake clock is not a signal on its own). For a red-CI resume, fetch the evidence
+  completed with conclusion `failure`, with the failing job names in the selection reason — a
+  job whose conclusion is `failure`, `timed_out` or `cancelled` is a failing job, and only a
+  check still running, or with an unknown state, means "wait"; a failed aggregate with no
+  nameable sibling is still a signal (reported as `unknown job`). The known-flake exemption is
+  decided from the failing test names in the FAILED JOB'S LOG (the check run's `external_id`
+  names the Actions job; the log endpoint redirects to a signed URL): the job name or the
+  check-run output fields alone are not enough, and an unreadable log is a real failure (the
+  job resumes). A failure confined to known flakes from the nightly-e2e flake clock is not a
+  signal on its own. For a red-CI resume, fetch the evidence
   yourself before pushing: `gh run view <run-id> --log-failed` (trimmed) for the first failing
   test or compiler lines, and re-run `npx tsc --noEmit -p .` and the full suite locally. Do NOT
   open a new PR: address the findings on the existing
