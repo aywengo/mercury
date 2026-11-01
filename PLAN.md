@@ -41,6 +41,7 @@ Record: [`docs/host-installer.md`](docs/host-installer.md)
 | #1071 | host service install writes a host unit with no worker: a fresh host queues Runs forever | done | #1072 |
 | #1074 | a fresh host cannot run: the service units drop the user bin from PATH, and nothing creates the data directory | done | #1075 |
 | #1078 | workflows are unreachable on a running host: the registry is never built, and there is no per-host directory | done | #1079 |
+| #1095 | e2e: fleetBots writes its Runs into the live host database (`MERCURY_DATA_DIR` is not a variable) | in progress | — |
 | #1029 | release: the formula push to main is refused by the ruleset, so every release leaves Homebrew… | done | #1046 |
 | #1045 | release: a failed curl probe yields HTTP 000000 in the release notes (and the test stub hides it) | done | #1047 |
 

@@ -11,7 +11,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tempDir } from './helpers.ts';
 
@@ -30,13 +30,17 @@ async function withServer<T>(envExtra: Record<string, string>, fn: (base: string
     cwd: ROOT,
     env: {
       ...process.env,
+      ...envExtra,
+      // Isolation keys come LAST so nothing above can override them. `MERCURY_DB` is the variable
+      // src/config.ts reads; an earlier version of this helper set `MERCURY_DATA_DIR`, which is not
+      // a variable at all, so the child inherited the ambient `MERCURY_DB` -- inside a Mercury Run
+      // that is the operator's live database (#1095).
       MERCURY_PORT: String(port),
       MERCURY_BIND_HOST: '127.0.0.1',
-      MERCURY_DATA_DIR: join(dir, 'data'),
+      MERCURY_DB: join(dir, 'data', 'mercury.db'),
       MERCURY_WORKSPACE_BASE: join(dir, 'ws'),
       MERCURY_ADMIN_TOKEN: 'tok-admin-0123456789abcdef',
       MERCURY_EMBEDDED_WORKER: 'false',
-      ...envExtra,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -102,4 +106,17 @@ test('MERCURY_WORKFLOWS_DIR decides which templates THIS host carries (#1078, FB
     const ids = ((listed.body as { workflows?: { id: string }[] }).workflows ?? []).map((w) => w.id);
     assert.deepEqual(ids, ['only-here'], 'the override directory is the whole set, not an addition');
   });
+});
+
+test('the spawned host never opens an inherited MERCURY_DB (#1095)', async () => {
+  // A Run's child processes inherit MERCURY_DB, and inside a Mercury Run that value is the HOST's
+  // live database. A test that thinks it is isolating itself but names the wrong variable writes
+  // its Runs there -- which is what `MERCURY_DATA_DIR` did: the suite ran from a nightly Run and
+  // left a stray "Say DONE." Run in the operator's state.
+  const poison = join(tempDir('workflows-poison-'), 'live.db');
+  await withServer({ MERCURY_DB: poison }, async (base) => {
+    const listed = await get(base, '/api/workflows');
+    assert.equal(listed.status, 200);
+  });
+  assert.equal(existsSync(poison), false, 'the host must use the test database, never the inherited path');
 });
