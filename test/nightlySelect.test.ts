@@ -1699,6 +1699,44 @@ test('#980: a failure confined to a known flake does not trigger a red-ci resume
   assert.notEqual(s.rung, 0, 'a known-flake-only red head waits for a human review instead of looping');
 });
 
+test('#980: loadFlakeTestNames rejects corrupt entries the flake-clock loader rejects (review r6)', async () => {
+  const { loadFlakeTestNames } = await import('../.agents/skills/nightly/select.ts');
+  const env = { XDG_STATE_HOME: '/unused' };
+  const state = {
+    ok: { test: 'e2e/retries a flaky request', error: 'timeout', nights: ['2026-10-16'] },
+    // The record from the finding: valid JSON, but nights is null.
+    nullNights: { test: 'e2e/superseded name', error: 'timeout', nights: null },
+    missingError: { test: 'e2e/other test', nights: ['2026-10-16'] },
+    numberNights: { test: 'e2e/other test', error: 'timeout', nights: [1] },
+    emptyTest: { test: '', error: 'timeout', nights: ['2026-10-16'] },
+    stringEntry: 'oops',
+  };
+  assert.deepEqual(
+    loadFlakeTestNames(env, () => JSON.stringify(state)),
+    ['e2e/retries a flaky request'],
+    'only the fully-shaped entry yields a name',
+  );
+});
+
+test('#980: a corrupt flake record does not suppress a red-ci resume (review r6)', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const { writeFileSync, mkdirSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const { tempDir } = await import('./helpers.ts');
+  const home = tempDir('nightly-flake-corrupt-');
+  mkdirSync(join(home, 'mercury', 'nightly'), { recursive: true });
+  // Valid JSON, corrupt entry: the job log names exactly this test, so an unvalidated loader
+  // would exonerate the head — e2e.ts::loadFlakeState rejects this shape, the selector must too.
+  writeFileSync(join(home, 'mercury', 'nightly', 'e2e-flakes.json'), JSON.stringify({
+    fp1: { test: 'e2e/retries a flaky request', error: 'timeout', nights: null },
+  }));
+  const s = await runSelectorWith(redCiIo({
+    failingJobs: [{ name: 'test (node 22.18.0)', externalId: '9001', log: '✖ e2e/retries a flaky request (12.3ms)' }],
+  }) as never, { REPO: 'aywengo/mercury', XDG_STATE_HOME: home }, true);
+  assert.equal(s.rung, 0, 'a corrupt record is not a recorded flake — the red head resumes');
+  assert.equal(s.issue, 965);
+});
+
 test('#980: a real failure next to a known flake still resumes', async () => {
   const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
   const home = await flakeHome();

@@ -214,7 +214,10 @@ export function isFlakeConfinedJob(output: string, flakeTests: string[]): boolea
  * The nightly flake-clock state's recorded test names (the file e2e.ts writes at
  * `<state-home>/mercury/nightly/e2e-flakes.json`, one entry per fingerprint). A missing, corrupt
  * or unreadable file yields NO known flakes: the red-CI resume fires (fail toward acting on red
- * CI, never toward ignoring it).
+ * CI, never toward ignoring it). An entry is accepted with the SAME shape check as
+ * e2e.ts::loadFlakeState (`test` string, `error` string, `nights` array of strings): a
+ * valid-JSON-but-corrupt record is not a recorded flake, so it cannot suppress a resume
+ * (#980 review r6).
  */
 export function loadFlakeTestNames(env: NodeJS.ProcessEnv, read?: (p: string) => string): string[] {
   const base = env.XDG_STATE_HOME?.trim() !== '' && env.XDG_STATE_HOME ? env.XDG_STATE_HOME.trim()
@@ -231,8 +234,10 @@ export function loadFlakeTestNames(env: NodeJS.ProcessEnv, read?: (p: string) =>
   const names: string[] = [];
   for (const entry of Object.values(raw as Record<string, unknown>)) {
     if (entry === null || typeof entry !== 'object') continue;
-    const test = (entry as { test?: unknown }).test;
-    if (typeof test === 'string' && test !== '') names.push(test);
+    const e = entry as { test?: unknown; error?: unknown; nights?: unknown };
+    if (typeof e.test !== 'string' || e.test === '' || typeof e.error !== 'string' || !Array.isArray(e.nights)) continue;
+    if (!e.nights.every((n) => typeof n === 'string')) continue;
+    names.push(e.test);
   }
   return names;
 }
