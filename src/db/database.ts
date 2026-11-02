@@ -557,7 +557,7 @@ export const MIGRATIONS: string[] = [
 export const BUSY_TIMEOUT_MS = 5_000;
 
 /** Synchronous pause, used only for startup contention before any connection is serving traffic. */
-function sleepSync(ms: number): void {
+export function sleepSync(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 

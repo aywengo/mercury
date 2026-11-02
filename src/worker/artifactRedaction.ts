@@ -83,7 +83,19 @@ function encodedVariants(values: string[]): string[] {
   return [...out];
 }
 
-/** Recursively scrub every file under the artifact dirs. Returns the number of files changed. */
+/** ENOENT is the only error a traversal may read as "nothing here": every other code means the
+ * pass did not read everything, and that must surface instead of being stamped complete (#976). */
+function enoent(err: unknown): boolean {
+  return (err as { code?: string } | undefined)?.code === 'ENOENT';
+}
+
+/**
+ * Recursively scrub every file under the artifact dirs. Returns the number of files changed.
+ *
+ * A traversal that cannot read a directory or file (EACCES on an unreadable subdirectory)
+ * THROWS rather than skipping: a pass that did not read everything is incomplete, and a caller
+ * that stamps runs must only stamp a complete pass (#976).
+ */
 export function redactRunArtifacts(
   workspacePath: string,
   secrets: string[],
@@ -106,7 +118,8 @@ export function redactRunArtifacts(
       let size: number;
       try {
         size = statSync(path).size;
-      } catch {
+      } catch (err) {
+        if (!enoent(err)) throw err; // unreadable file: an incomplete pass must not report success (#976)
         return false; // vanished between readdir and stat: nothing to scrub
       }
       if (size > maxFileBytes) {
@@ -138,8 +151,11 @@ export function redactRunArtifacts(
     let entries;
     try {
       entries = readdirSync(dir, { withFileTypes: true });
-    } catch {
-      return 0; // no artifacts of this kind: nothing to do
+    } catch (err) {
+      if (enoent(err)) return 0; // no artifacts of this kind: nothing to do
+      // A directory the pass could not read is NOT "no artifacts": the pass is incomplete,
+      // and the caller must not treat it as complete (#976).
+      throw err;
     }
     let count = 0;
     for (const entry of entries) {
