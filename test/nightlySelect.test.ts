@@ -1520,11 +1520,14 @@ test('a failed release COMMENT still makes the issue selectable (label-first, #1
 function redCiIo(opts: {
   ciStatus?: string;
   ciConclusion?: string | null;
-  /** A failing sibling job of the `ci` aggregate. `externalId` is the Actions job id; `log`
-   *  is the job log the known-flake guard reads (a job without `externalId` has no readable
+  /** A failing sibling job of the `ci` aggregate. `externalId` is the check run's
+   *  `external_id` (integration-supplied: numeric for Actions, opaque otherwise, #980 r8);
+   *  `detailsUrl` is the check run's `details_url`; `jobId` is the NUMERIC job id the log
+   *  endpoint serves for (default: `externalId` when numeric — the pre-r8 world). `log` is the
+   *  job log the known-flake guard reads (a job whose id resolves to nothing has no readable
    *  log — a real failure). `logStatus` overrides the fetch status; `logError` makes the
    *  transport throw. */
-  failingJobs?: { name: string; conclusion?: string; externalId?: string; log?: string; logStatus?: number; logError?: boolean }[];
+  failingJobs?: { name: string; conclusion?: string; externalId?: string; detailsUrl?: string; jobId?: string; log?: string; logStatus?: number; logError?: boolean }[];
   ownerReviews?: { state: string; commit_id: string }[];
   copilotThreads?: number;
   /** Capped thread query (hasNextPage: true): the review scan is INCOMPLETE, so review-based
@@ -1540,7 +1543,7 @@ function redCiIo(opts: {
   if (opts.extraReadyIssue) issues.push(issue({ number: 975, user: { login: 'aywengo' }, labels: [{ name: 'nightly:ready' }, { name: 'priority: high' }] }));
   const checkRuns = [
     { name: 'ci', status: opts.ciStatus ?? 'completed', conclusion: opts.ciConclusion === undefined ? 'failure' : opts.ciConclusion },
-    ...(opts.failingJobs ?? []).map((j) => ({ name: j.name, status: 'completed', conclusion: j.conclusion ?? 'failure', ...(j.externalId !== undefined ? { external_id: j.externalId } : {}) })),
+    ...(opts.failingJobs ?? []).map((j) => ({ name: j.name, status: 'completed', conclusion: j.conclusion ?? 'failure', ...(j.externalId !== undefined ? { external_id: j.externalId } : {}), ...(j.detailsUrl !== undefined ? { details_url: j.detailsUrl } : {}) })),
     { name: 'changes', status: 'completed', conclusion: 'success' },
   ];
   return {
@@ -1558,7 +1561,9 @@ function redCiIo(opts: {
     async getText(path: string) {
       const m = path.match(/\/actions\/jobs\/(\d+)\/logs$/);
       if (!m) return null;
-      const job = (opts.failingJobs ?? []).find((j) => j.externalId === m[1]);
+      const idOf = (j: { externalId?: string; jobId?: string }): string | undefined =>
+        j.jobId ?? (j.externalId !== undefined && /^\d+$/.test(j.externalId) ? j.externalId : undefined);
+      const job = (opts.failingJobs ?? []).find((j) => idOf(j) === m[1]);
       if (job?.logError) throw new Error('log fetch failed');
       if (!job || job.log === undefined) return { status: 404, text: 'Not Found' };
       return { status: job.logStatus ?? 200, text: job.log };
@@ -1830,6 +1835,62 @@ test('#980: fetchJobLog returns null for a missing transport, a bad id or a non-
   assert.equal(await fetchJobLog({ async getText() { return { status: 404, text: 'Not Found' }; } }, 'aywengo/mercury', '123'), null, 'non-2xx is no log');
   const ok = await fetchJobLog({ async getText(p: string) { return { status: 200, text: `log of ${p}` }; } }, 'aywengo/mercury', '123');
   assert.equal(ok, 'log of /repos/aywengo/mercury/actions/jobs/123/logs');
+});
+
+test('#980: actionsJobId resolves the numeric job id from external_id or details_url (review r8)', async () => {
+  const { actionsJobId } = await import('../.agents/skills/nightly/select.ts');
+  const details = (job: string) => `https://github.com/aywengo/mercury/actions/runs/77/jobs/${job}`;
+  // A numeric external_id (the Actions integration) is the job id, taken as-is.
+  assert.equal(actionsJobId({ external_id: '9001' }), '9001', 'numeric external_id wins');
+  // Numeric external_id wins even when details_url names a different job (the field is
+  // authoritative when it is in the Actions shape).
+  assert.equal(actionsJobId({ external_id: '9001', details_url: details('9002') }), '9001', 'numeric external_id outranks details_url');
+  // An OPAQUE external_id (UUID) has no job log; the numeric id is recovered from details_url.
+  assert.equal(actionsJobId({ external_id: '4f0c1a2e-77aa-4c8e-9b01-2c3d4e5f6a7b', details_url: details('9003') }), '9003', 'opaque external_id falls back to details_url');
+  // No external_id at all: details_url is the only source.
+  assert.equal(actionsJobId({ details_url: details('9004') }), '9004', 'details_url alone resolves the id');
+  // Opaque external_id with NO details_url (or a non-Actions one) resolves to nothing.
+  assert.equal(actionsJobId({ external_id: '4f0c1a2e-77aa-4c8e-9b01-2c3d4e5f6a7b' }), null, 'opaque external_id with no details_url is unresolvable');
+  assert.equal(actionsJobId({ external_id: '4f0c1a2e-77aa-4c8e-9b01-2c3d4e5f6a7b', details_url: 'https://example.com/check/abc' }), null, 'a non-Actions details_url is unresolvable');
+  assert.equal(actionsJobId({}), null, 'nothing to resolve is null');
+});
+
+test('#980: a flake-only job with an OPAQUE external_id still reads its log via details_url (review r8)', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const home = await flakeHome();
+  // The check run is an Actions job, but its external_id is an opaque UUID (the integration
+  // reports a non-numeric id). The numeric job id is only in details_url. The log names exactly
+  // the recorded flake. Pre-r8, fetchJobLog rejected the UUID, the log was unreadable, and the
+  // head was treated as a real failure (resume). Now the id resolves from details_url and the
+  // flake-only head must NOT resume.
+  const s = await runSelectorWith(redCiIo({
+    failingJobs: [{
+      name: 'test (node 22.18.0)',
+      externalId: '4f0c1a2e-77aa-4c8e-9b01-2c3d4e5f6a7b',
+      detailsUrl: 'https://github.com/aywengo/mercury/actions/runs/77/jobs/9001',
+      jobId: '9001',
+      log: '✖ e2e/retries a flaky request (12.3ms)',
+    }],
+  }) as never, { REPO: 'aywengo/mercury', XDG_STATE_HOME: home }, true);
+  assert.notEqual(s.rung, 0, 'an opaque external_id must not defeat the flake exemption — the job id resolves from details_url');
+});
+
+test('#980: a job whose job id CANNOT be resolved still resumes (fail closed, review r8)', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const home = await flakeHome();
+  // Opaque external_id and no usable details_url: the job id is unresolvable, the log is
+  // unreadable, and an unreadable log is a REAL failure — the head resumes. This pins that the
+  // r8 fix does not turn an unresolvable id into a spurious flake exemption.
+  const s = await runSelectorWith(redCiIo({
+    failingJobs: [{
+      name: 'test (node 22.18.0)',
+      externalId: '4f0c1a2e-77aa-4c8e-9b01-2c3d4e5f6a7b',
+      detailsUrl: 'https://example.com/check/abc',
+      log: '✖ e2e/retries a flaky request (12.3ms)',
+    }],
+  }) as never, { REPO: 'aywengo/mercury', XDG_STATE_HOME: home }, true);
+  assert.equal(s.rung, 0, 'an unresolvable job id leaves an unreadable log — the red head resumes');
+  assert.equal(s.issue, 965);
 });
 
 test('#980: ladder ordering puts owner changes first, then red ci, then Copilot findings', () => {

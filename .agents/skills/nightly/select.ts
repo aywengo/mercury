@@ -139,9 +139,35 @@ export interface CheckRunShim {
   name?: string | null;
   status?: string | null;
   conclusion?: string | null;
-  /** The Actions job id behind the check run (numeric as a string): the key to the job log the
-   *  known-flake guard reads (#980 review r2). Absent on non-Actions checks. */
+  /** Integration-supplied identifier (#980 review r8): the Actions integration puts the numeric
+   *  job id here, but other integrations put opaque values (a UUID is the common shape). Resolve
+   *  through actionsJobId, never parse this directly. */
   external_id?: string | null;
+  /** Where the check's details live. For an Actions job this is
+   *  `https://github.com/<owner>/<repo>/actions/runs/<runId>/jobs/<jobId>` — the fallback source
+   *  of the numeric job id when external_id is opaque (#980 review r8). */
+  details_url?: string | null;
+}
+
+/**
+ * The numeric Actions job id behind a check run, or null when none can be resolved
+ * (#980 review r8). The Checks API's `external_id` is an INTEGRATION-SUPPLIED identifier: the
+ * Actions integration reports the job id (numeric), any other integration reports whatever it
+ * wants (commonly a UUID). An opaque external_id has no job log at the actions/jobs endpoint —
+ * but the Actions check run still names its job in `details_url`, and that is where the id is
+ * recovered from. Nothing resolvable (opaque id, no Actions details_url, non-Actions check) is
+ * null: the caller treats that as an unreadable log and fails toward resuming, the same as a
+ * fetch failure.
+ */
+export function actionsJobId(run: Pick<CheckRunShim, 'external_id' | 'details_url'>): string | null {
+  const ext = run.external_id;
+  if (typeof ext === 'string' || typeof ext === 'number') {
+    const s = String(ext);
+    if (/^\d+$/.test(s)) return s;
+  }
+  const url = typeof run.details_url === 'string' ? run.details_url : '';
+  const m = url.match(/\/actions\/runs\/\d+\/jobs\/(\d+)/);
+  return m ? m[1] : null;
 }
 
 /** Conclusions that mean a job did NOT succeed but also do NOT mean "wait" (#980 review r1):
@@ -261,23 +287,25 @@ export const JOB_LOG_MAX_BYTES = 2 * 1024 * 1024;
  * name or the check run's output fields alone cannot name the failing tests. An unreadable log
  * is a REAL failure: the caller resumes, it does not excuse the head.
  *
- * `externalId` is the Actions job id (the check run's `external_id`); the log endpoint
- * 302-redirects to a signed URL and node's fetch follows it (verified 2026-11-01). Bounds:
- * FETCH_TIMEOUT_MS per fetch and JOB_LOG_MAX_BYTES of text. null = no log (missing transport,
- * non-numeric id, fetch failure, non-2xx, or a body past the cap — truncated evidence cannot
- * exonerate a head, #980 review r5) — the caller treats that as a real failure.
+ * `jobId` is the RESOLVED numeric Actions job id (actionsJobId, #980 review r8): the check
+ * run's raw `external_id` is an integration-supplied identifier and is not trusted here. The
+ * log endpoint 302-redirects to a signed URL and node's fetch follows it (verified 2026-11-01).
+ * Bounds: FETCH_TIMEOUT_MS per fetch and JOB_LOG_MAX_BYTES of text. null = no log (missing
+ * transport, unresolvable or non-numeric id, fetch failure, non-2xx, or a body past the cap —
+ * truncated evidence cannot exonerate a head, #980 review r5) — the caller treats that as a
+ * real failure.
  */
 export async function fetchJobLog(
   io: { getText?: (path: string) => Promise<{ status: number; text: string } | null> },
   repo: string,
-  externalId: unknown,
+  jobId: unknown,
 ): Promise<string | null> {
   if (!io.getText) return null;
-  if (typeof externalId !== 'string' && typeof externalId !== 'number') return null;
-  const jobId = String(externalId);
-  if (!/^\d+$/.test(jobId)) return null; // an Actions job id is numeric; anything else has no job log here
+  if (typeof jobId !== 'string' && typeof jobId !== 'number') return null;
+  const id = String(jobId);
+  if (!/^\d+$/.test(id)) return null; // an Actions job id is numeric; anything else has no job log here
   try {
-    const res = await io.getText(`/repos/${repo}/actions/jobs/${jobId}/logs`);
+    const res = await io.getText(`/repos/${repo}/actions/jobs/${id}/logs`);
     if (res === null || res.status < 200 || res.status >= 300) return null;
     // The same policy as ghGetText's cap: a body PAST the cap is truncated evidence, and
     // truncated evidence cannot establish a flake-only failure — a real failure after the cap
@@ -1132,7 +1160,7 @@ export async function runSelectorWith(
                   real.push(job);
                   continue;
                 }
-                const log = await fetchJobLog(io, repo, run?.external_id);
+                const log = await fetchJobLog(io, repo, run ? actionsJobId(run) : null);
                 if (log !== null && isFlakeConfinedJob(log, flakeTests)) {
                   console.error(`resume scan: PR #${pr.number} job '${job}' confined to known flakes; not a signal on its own`);
                 } else {
