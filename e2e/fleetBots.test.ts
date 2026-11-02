@@ -88,7 +88,11 @@ async function bootHost(name: string, token: string, workflowsDir: string, repoP
   const env = {
     MERCURY_PORT: String(p),
     MERCURY_BIND_HOST: '127.0.0.1',
-    MERCURY_DATA_DIR: join(dir, 'data'),
+    // MERCURY_DB is the variable the server reads (src/config.ts: `env.MERCURY_DB`). It must be set
+    // explicitly: a child inherits the ambient value, and inside a Mercury Run that value is the
+    // HOST's live database -- so a test that merely "sets a temp dir" writes its Runs into the
+    // operator's real state and can even start a worker against it (#1095).
+    MERCURY_DB: join(dir, 'data', 'mercury.db'),
     MERCURY_WORKSPACE_BASE: join(dir, 'ws'),
     MERCURY_ADMIN_TOKEN: token,
     MERCURY_WORKFLOWS_DIR: workflowsDir,
