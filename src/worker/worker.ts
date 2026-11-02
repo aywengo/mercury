@@ -4,7 +4,7 @@
 
 import type { DatabaseSync } from 'node:sqlite';
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { isTerminal, STUCK_CANDIDATE_STATUSES } from '../domain/stateMachine.ts';
@@ -36,7 +36,7 @@ import type { OutboxStore } from '../knowledge/outbox.ts';
 import type { KnowledgeBounds } from '../knowledge/validation.ts';
 import type { ContextKnowledgeBlock } from '../knowledge/types.ts';
 import type { Note } from '../knowledge/types.ts';
-import { tx } from '../db/database.ts';
+import { sleepSync, tx } from '../db/database.ts';
 import { resolveProfile, type CredentialProfile, type CredentialProfiles } from '../host/credentials-profiles.ts';
 import { buildRunEnvironment, CredentialSourceMissingError } from './runEnvironment.ts';
 import type { SkillRegistry } from '../skills/skillRegistry.ts';
@@ -228,9 +228,7 @@ export class Worker {
       this.deps.stuckCheckIntervalMs ?? 60_000,
     );
     this.stuckTimer.unref?.();
-    // A worker that takes over from one that died owes the retries that worker decided on but
-    // never created (issue #987): the intent is in the database, so it survives the restart.
-    this.recoverPendingRetries();
+    this.runStartupRecovery();
     // Backlog alerting gets its own timer for the same reason stuck-run checks do (AGENTS.md:
     // "periodic work that must run *while* a Run executes" needs its own timer). Driven from the
     // claim loop it was sampled once per iteration, and an iteration is `await this.execute(run)`
@@ -284,28 +282,7 @@ export class Worker {
   private async loop(): Promise<void> {
     while (this.running) {
       try {
-        // Reap expired leases (worker crash). Active runs are marked FAILED by the
-        // queue; append the terminal event here so the audit trail stays complete
-        // (the queue has no EventStore access). The queue only reports runs this
-        // worker actually transitioned (changes === 1), so no duplicate events.
-        // The failure events are appended from INSIDE the reap transaction (issue #61).
-        // They used to be appended here, after reapExpiredLeases() had committed, so a crash
-        // between the two left the run FAILED with no `error` and no `run.failed` event --
-        // the state said it failed and the timeline said nothing happened.
-        const reaped = this.deps.queue.reapExpiredLeases(Date.now(), (runId) => {
-          const row = this.deps.runs.get(runId);
-          const durationMs = row?.startedAt ? Date.now() - Date.parse(row.startedAt) : null;
-          this.deps.events.append(runId, 'error', { message: LEASE_EXPIRED_ERROR });
-          this.deps.events.append(runId, 'run.failed', {
-            runId,
-            error: LEASE_EXPIRED_ERROR,
-            kind: 'infrastructure',
-            durationMs,
-          });
-        });
-        if (reaped.failed.length > 0) {
-          this.log('warn', 'reaped runs with expired leases', { runIds: reaped.failed });
-        }
+        this.reapExpiredLeases();
         const run = this.deps.queue.claim(this.deps.workerId, this.deps.leaseMs);
         // Backlog sampling moved to this.backlogTimer (issue #73 L2); it must not live here.
         if (run) {
@@ -322,6 +299,131 @@ export class Worker {
         this.log('error', 'worker loop error', { error: String(err) });
         await sleep(this.deps.pollMs);
       }
+    }
+  }
+
+  /**
+   * Reap expired leases (worker crash) and append the terminal events for what the reaper
+   * failed.
+   *
+   * Active runs are marked FAILED by the queue; the terminal events are appended here, from
+   * INSIDE the reap transaction (issue #61), so the audit trail stays complete (the queue has
+   * no EventStore access) and state and timeline commit together. They used to be appended
+   * after reapExpiredLeases() had committed, so a crash between the two left the run FAILED
+   * with no `error` and no `run.failed` event -- the state said it failed and the timeline
+   * said nothing happened.
+   *
+   * The queue only reports runs this worker actually transitioned (changes === 1), so no
+   * duplicate events when a concurrent reaper or the owning worker's finalize won the race.
+   */
+  private reapExpiredLeases(): void {
+    const reaped = this.deps.queue.reapExpiredLeases(Date.now(), (runId) => {
+      const row = this.deps.runs.get(runId);
+      const durationMs = row?.startedAt ? Date.now() - Date.parse(row.startedAt) : null;
+      this.deps.events.append(runId, 'error', { message: LEASE_EXPIRED_ERROR });
+      this.deps.events.append(runId, 'run.failed', {
+        runId,
+        error: LEASE_EXPIRED_ERROR,
+        kind: 'infrastructure',
+        durationMs,
+      });
+    });
+    if (reaped.failed.length > 0) {
+      this.log('warn', 'reaped runs with expired leases', { runIds: reaped.failed });
+    }
+  }
+
+  /**
+   * Start-up recovery: reap expired leases, sweep the workspaces the reaper's runs never got
+   * the finalize-time scrub for (#976), and honour the retry intents the dead worker left
+   * behind (#987).
+   *
+   * Bounded retry, because start() has already set running before this runs: a throw that
+   * escaped would leave the instance unable to ever start again (review on #976). The expected
+   * failure is SQLITE_BUSY -- the API or a sibling worker holds the write lock -- and
+   * busy_timeout has already waited for it, so a short pause and a retry is the recovery.
+   *
+   * The reap stays BEFORE the sweep: the sweep's candidate list is the reaper's FAILED set, so
+   * a run whose lease expired while every worker was down must be failed (with its terminal
+   * events) in this same start -- without the start-up reap, the first worker back after a
+   * crash would only sweep the crash victim's workspace on its NEXT start.
+   *
+   * Swallowing the failure is not a fix either: it would defer redaction to another restart.
+   * At the cap, resetStartupState() undoes what start() set and the error re-throws, so the
+   * caller sees it (the worker process exits and is restarted) and a later start() works.
+   */
+  private runStartupRecovery(): void {
+    const maxAttempts = 3;
+    for (let attempt = 1; ; attempt++) {
+      try {
+        this.reapExpiredLeases();
+        this.sweepUnfinalizedWorkspaces();
+        // A worker that takes over from one that died owes the retries that worker decided on
+        // but never created (issue #987): the intent is in the database, so it survives the
+        // restart.
+        this.recoverPendingRetries();
+        return;
+      } catch (err) {
+        const message = String(err instanceof Error ? err.message : err);
+        if (attempt >= maxAttempts) {
+          this.resetStartupState();
+          this.log('error', 'start-up recovery failed; the worker stays stopped', { attempt, error: message });
+          throw err;
+        }
+        this.log('warn', 'start-up recovery failed; retrying', { attempt, error: message });
+        sleepSync(250);
+      }
+    }
+  }
+
+  /**
+   * Undo the state start() set, so a start-up failure that escaped runStartupRecovery() does
+   * not wedge the instance: with running still true, no later start() could ever run (review
+   * on #976). Everything start() creates after the recovery (claim loop, backlog timer,
+   * knowledge pusher/puller) does not exist yet, so only the stuck-run timer needs clearing.
+   */
+  private resetStartupState(): void {
+    this.running = false;
+    if (this.stuckTimer) clearInterval(this.stuckTimer);
+    this.stuckTimer = null;
+  }
+
+  /**
+   * Sweep workspaces of runs the worker never finalized (issue #976).
+   *
+   * The finalize-time scrub (#944) lives in execute()'s finally, which a dead worker never
+   * reaches: a run whose lease expired was marked FAILED by the reaper, not finalized by any
+   * worker, and its session transcript and kernel snapshots keep their secrets on disk until
+   * workspace GC. This pass closes that gap -- once, per worker start, over every reaper-failed
+   * run whose workspace still exists, with the same redaction layer the live pass uses.
+   *
+   * Best-effort, the same choice the live scrub makes: an incomplete pass (an unreadable
+   * subdirectory) leaves the run unstamped so the next start retries it, and a stamp failure
+   * is caught per Run so one bad run does not skip the remaining candidates (review on #976).
+   * A failure of the candidate list itself propagates to runStartupRecovery, which retries it.
+   */
+  private sweepUnfinalizedWorkspaces(): void {
+    const secrets = this.deps.artifactSecrets;
+    if (!secrets || secrets.length === 0) return;
+    const swept: string[] = [];
+    for (const { id, workspacePath } of this.deps.runs.listUnsweptFailed(LEASE_EXPIRED_ERROR)) {
+      if (!workspacePath || !existsSync(workspacePath)) continue; // GC already removed it: nothing to scrub
+      if (this.scrubArtifacts(id, workspacePath)) {
+        try {
+          this.deps.runs.markArtifactsSwept(id);
+          swept.push(id);
+        } catch (stampErr) {
+          // Per Run: the run stays a candidate and the next start stamps it, while the sweep
+          // continues with the remaining candidates (review on #976).
+          this.log('warn', 'artifact sweep stamp failed; the run stays a candidate', {
+            runId: id,
+            error: String(stampErr instanceof Error ? stampErr.message : stampErr),
+          });
+        }
+      }
+    }
+    if (swept.length > 0) {
+      this.log('info', 'swept workspaces of runs the worker never finalized', { runIds: swept });
     }
   }
 
@@ -810,13 +912,16 @@ await this.finalize(run, outcome, skills);
 
   /**
    * Best-effort at-rest redaction of the Run's agent artifacts (issue #944). Runs after the
-   * agent process is gone, so the files are stable.
+   * agent process is gone, so the files are stable. Returns whether the pass read everything
+   * -- the start-up sweep only stamps a run swept in that case (#976). Unreadable entries are
+   * collected, not thrown: the pass scrubs what it can reach, and the failures stay in the log
+   * so the retry on the next start has something to read.
    */
-  private scrubArtifacts(runId: string, path: string): void {
+  private scrubArtifacts(runId: string, path: string): boolean {
     const secrets = this.deps.artifactSecrets;
-    if (!secrets || secrets.length === 0) return;
+    if (!secrets || secrets.length === 0) return true;
     try {
-      const scrubbed = redactRunArtifacts(path, secrets, {
+      const { scrubbed, failures } = redactRunArtifacts(path, secrets, {
         onSkip: (file, size) => {
           this.log('warn', 'artifact too large for redaction; skipped', { runId, file, size });
         },
@@ -824,8 +929,17 @@ await this.finalize(run, outcome, skills);
       if (scrubbed > 0) {
         this.log('info', 'redacted secrets from agent artifacts', { runId, files: scrubbed });
       }
+      if (failures.length > 0) {
+        this.log('warn', 'artifact redaction incomplete; the unreadable entries are left for the next pass', {
+          runId,
+          failures,
+        });
+        return false;
+      }
+      return true;
     } catch (scrubErr) {
       this.log('warn', 'artifact redaction failed', { runId, error: String(scrubErr instanceof Error ? scrubErr.message : scrubErr) });
+      return false;
     }
   }
 

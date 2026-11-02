@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { chmodSync, mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { makeEnv, makeGitRepo, tempDir, waitFor } from './helpers.ts';
 import { redactRunArtifacts, ARTIFACT_DIRS } from '../src/worker/artifactRedaction.ts';
@@ -13,7 +13,7 @@ test('issue #944: session transcripts are scrubbed of declared secret values', (
   mkdirSync(dir, { recursive: true });
   const file = join(dir, 'session-1.jsonl');
   writeFileSync(file, JSON.stringify({ env: { GH_TOKEN: TOKEN, TOOL: 'gh' } }) + '\n' + 'ran gh auth token: ' + TOKEN + '\n');
-  const scrubbed = redactRunArtifacts(ws, [TOKEN]);
+  const { scrubbed } = redactRunArtifacts(ws, [TOKEN]);
   assert.equal(scrubbed, 1);
   const out = readFileSync(file, 'utf8');
   assert.ok(!out.includes(TOKEN), 'transcript must not contain the secret');
@@ -32,7 +32,7 @@ test('issue #944: binary kernel snapshots are scrubbed in place at equal length'
   const prefix = Buffer.from([0x80, 0x04, 0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x8c]);
   const payload = Buffer.concat([prefix, Buffer.from([TOKEN.length]), Buffer.from(TOKEN, 'utf8'), Buffer.from([0x00, 0x00])]);
   writeFileSync(file, payload);
-  const scrubbed = redactRunArtifacts(ws, [TOKEN]);
+  const { scrubbed } = redactRunArtifacts(ws, [TOKEN]);
   assert.equal(scrubbed, 1);
   const out = readFileSync(file);
   assert.ok(!out.includes(Buffer.from(TOKEN)), 'snapshot must not contain the secret');
@@ -42,12 +42,12 @@ test('issue #944: binary kernel snapshots are scrubbed in place at equal length'
 
 test('issue #944: runs with no artifact secrets are untouched and empty dirs are fine', () => {
   const ws = tempDir('mercury-artifacts-');
-  assert.equal(redactRunArtifacts(ws, []), 0);
-  assert.equal(redactRunArtifacts(ws, [TOKEN]), 0); // no artifact dirs at all
+  assert.equal(redactRunArtifacts(ws, []).scrubbed, 0);
+  assert.equal(redactRunArtifacts(ws, [TOKEN]).scrubbed, 0); // no artifact dirs at all
   const dir = join(ws, '.mercury-sessions');
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, 'clean.jsonl'), 'nothing secret here\n');
-  assert.equal(redactRunArtifacts(ws, [TOKEN]), 0);
+  assert.equal(redactRunArtifacts(ws, [TOKEN]).scrubbed, 0);
   assert.ok(existsSync(join(dir, 'clean.jsonl')));
 });
 
@@ -103,7 +103,7 @@ test('issue #944 review on #965: a NUL-free file with invalid UTF-8 is binary an
   const secretBytes = Buffer.from(TOKEN, 'utf8');
   const buf = Buffer.concat([Buffer.from([0x68, 0x69, 0xff, 0x02]), secretBytes, Buffer.from([0x03, 0xfe, 0x7f])]);
   writeFileSync(file, buf);
-  const scrubbed = redactRunArtifacts(ws, [TOKEN]);
+  const { scrubbed } = redactRunArtifacts(ws, [TOKEN]);
   assert.equal(scrubbed, 1);
   const out = readFileSync(file);
   assert.equal(out.length, buf.length, 'byte length preserved');
@@ -125,7 +125,7 @@ test('issue #944 review on #965: base64 copies of the secret and of the git x-ac
   const b64 = Buffer.from(TOKEN, 'utf8').toString('base64');
   const gitPair = Buffer.from('x-access-token:' + TOKEN, 'utf8').toString('base64');
   writeFileSync(file, 'auth ' + b64 + ' clone ' + gitPair + '\n');
-  const scrubbed = redactRunArtifacts(ws, [TOKEN]);
+  const { scrubbed } = redactRunArtifacts(ws, [TOKEN]);
   assert.equal(scrubbed, 1);
   const out = readFileSync(file, 'utf8');
   assert.ok(!out.includes(b64), 'base64 of the raw value must be gone');
@@ -139,7 +139,7 @@ test('issue #944 review on #965: files above the size cap are skipped and report
   const big = join(dir, 'big.jsonl');
   writeFileSync(big, 'x'.repeat(64) + TOKEN);
   const skipped: string[] = [];
-  const scrubbed = redactRunArtifacts(ws, [TOKEN], { maxFileBytes: 16, onSkip: (p) => skipped.push(p) });
+  const { scrubbed } = redactRunArtifacts(ws, [TOKEN], { maxFileBytes: 16, onSkip: (p) => skipped.push(p) });
   assert.equal(scrubbed, 0);
   assert.deepEqual(skipped, [big]);
   assert.ok(readFileSync(big, 'utf8').includes(TOKEN), 'skipped file is left alone');
@@ -177,3 +177,54 @@ test('issue #944 review on #965: a run whose agent writes a transcript then fail
     env.close();
   }
 });
+
+test('review on #976: an unreadable subdirectory is collected, and the pass scrubs the rest and reports incomplete',
+  { skip: process.getuid?.() === 0 ? 'running as root: chmod cannot make a directory unreadable' : false },
+  () => {
+    const ws = tempDir('mercury-artifacts-');
+    const locked = join(ws, '.mercury-sessions', 'locked');
+    mkdirSync(locked, { recursive: true });
+    const hidden = join(locked, 'session.jsonl');
+    writeFileSync(hidden, 'env dump: GH_TOKEN=' + TOKEN + '\n');
+    // A readable sibling in the same root and a secret in the OTHER artifact root: both must
+    // be scrubbed even though the first root holds an unreadable subtree (review on #976).
+    const sibling = join(ws, '.mercury-sessions', 'sibling.jsonl');
+    writeFileSync(sibling, 'env dump: GH_TOKEN=' + TOKEN + '\n');
+    const snapDir = join(ws, 'session-artifacts', 'run_x');
+    mkdirSync(snapDir, { recursive: true });
+    const snap = join(snapDir, 'kernel-state.dill');
+    writeFileSync(snap, Buffer.concat([Buffer.from([0x00, 0x01]), Buffer.from(TOKEN)]));
+    chmodSync(locked, 0o000);
+    const result = redactRunArtifacts(ws, [TOKEN]);
+    assert.equal(result.scrubbed, 2, 'the readable sibling and the kernel snapshot are scrubbed');
+    assert.equal(result.failures.length, 1, 'the unreadable directory is collected, not thrown');
+    assert.equal(result.failures[0].path, locked);
+    assert.equal(result.failures[0].code, 'EACCES');
+    assert.ok(!readFileSync(sibling, 'utf8').includes(TOKEN), 'readable sibling scrubbed despite the unreadable directory');
+    assert.ok(!readFileSync(snap).includes(Buffer.from(TOKEN)), 'the other artifact root is scrubbed too');
+    chmodSync(locked, 0o755);
+    assert.ok(readFileSync(hidden, 'utf8').includes(TOKEN), 'the unreadable file is left for the next pass');
+  }
+);
+
+test('review on #976: an unreadable file is collected, its siblings are scrubbed, and the pass reports incomplete',
+  { skip: process.getuid?.() === 0 ? 'running as root: chmod cannot make a file unreadable' : false },
+  () => {
+    const ws = tempDir('mercury-artifacts-');
+    const dir = join(ws, '.mercury-sessions');
+    mkdirSync(dir, { recursive: true });
+    const locked = join(dir, 'locked.jsonl');
+    writeFileSync(locked, 'env dump: GH_TOKEN=' + TOKEN + '\n');
+    const sibling = join(dir, 'sibling.jsonl');
+    writeFileSync(sibling, 'env dump: GH_TOKEN=' + TOKEN + '\n');
+    chmodSync(locked, 0o000);
+    const result = redactRunArtifacts(ws, [TOKEN]);
+    assert.equal(result.scrubbed, 1, 'the readable sibling is scrubbed');
+    assert.equal(result.failures.length, 1, 'the unreadable file is collected, not thrown');
+    assert.equal(result.failures[0].path, locked);
+    assert.equal(result.failures[0].code, 'EACCES');
+    assert.ok(!readFileSync(sibling, 'utf8').includes(TOKEN));
+    chmodSync(locked, 0o755);
+    assert.ok(readFileSync(locked, 'utf8').includes(TOKEN), 'the unreadable file is left for the next pass');
+  }
+);

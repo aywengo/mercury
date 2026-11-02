@@ -241,7 +241,7 @@ Record: [`docs/status.md`](docs/status.md)
 | --- | --- | --- | --- |
 | #942 | security: GitHub revoked the nightly GH_TOKEN ('mercury-pat') after a PR-description le… | done | — |
 | #944 | redactor: session transcripts and kernel-state snapshots store Run secrets unredacted | done | #965 |
-| #976 | artifact redaction: sweep workspaces of runs the worker never finalized | open | — |
+| #976 | artifact redaction: sweep workspaces of runs the worker never finalized | in progress | #1093 |
 | #1012 | worker: retry never resumes for hermes/claude/local (resume() throws on the retry run id) | done | #1097 |
 | #1060 | security: nightly Runs filed issues as the operator — the profile's token file held the operator's PAT, not the bot's (CP-4 was working; the tool shell had the Run's GH_CONFIG_DIR and GH_TOKEN) | done | #1061, #1062, #1063 |
 
