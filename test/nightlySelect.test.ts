@@ -1952,6 +1952,71 @@ test('#980: a path-shaped flake mention normalizes to the repo-relative recorded
   );
 });
 
+test('#980: a real failure whose name ends with a recorded flake name is not a flake (review r7)', async () => {
+  const { isFlakeConfinedJob } = await import('../.agents/skills/nightly/select.ts');
+  // The recorded flake is a bare test name; the real failure is a DISTINCT test whose name
+  // ends with the flake's at a / segment boundary — the old suffix match exonerated it.
+  assert.equal(
+    isFlakeConfinedJob('✖ e2e/a context-free resume (1.0ms)\n', ['a context-free resume']),
+    false,
+    'a distinct test whose name ends with the recorded name is a real failure',
+  );
+  assert.equal(
+    isFlakeConfinedJob('✖ a context-free resume (1.0ms)\n', ['a context-free resume']),
+    true,
+    'the recorded name itself still matches by full-name equality',
+  );
+});
+
+test('#980: a red head whose only failure ends with a recorded flake name still resumes (review r7)', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const { writeFileSync, mkdirSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const { tempDir } = await import('./helpers.ts');
+  const home = tempDir('nightly-flake-exact-');
+  mkdirSync(join(home, 'mercury', 'nightly'), { recursive: true });
+  writeFileSync(join(home, 'mercury', 'nightly', 'e2e-flakes.json'), JSON.stringify({
+    fp2: { test: 'a context-free resume', error: 'timeout', nights: ['2026-10-16'] },
+  }));
+  const s = await runSelectorWith(redCiIo({
+    failingJobs: [{ name: 'test (node 22.18.0)', externalId: '9001', log: '✖ e2e/a context-free resume (12.3ms)' }],
+  }) as never, { REPO: 'aywengo/mercury', XDG_STATE_HOME: home }, true);
+  assert.equal(s.rung, 0, 'a distinct test whose name ends with the recorded flake name is a real failure');
+  assert.equal(s.issue, 965);
+  assert.match(s.reason, /red ci on head sha965/);
+});
+
+// r7 blocker: the known-flake exemption must work through the PRODUCTION entry point. The
+// previous round shipped the guard with every test driving runSelectorWith directly, so the
+// NextIo -> runNext adapter wiring was never exercised and a flake-only red head would have
+// kept resuming every night. Pinned behaviorally through runNext (the CLI's call path).
+test('#980: runNext wires the job-log transport — a flake-only red head does not resume (review r7)', async () => {
+  const { runNext } = await import('../.agents/skills/nightly/next.ts');
+  const home = await flakeHome();
+  const fixture = redCiIo({
+    failingJobs: [{ name: 'test (node 22.18.0)', externalId: '9001', log: '✖ e2e/retries a flaky request (12.3ms)' }],
+  });
+  // runNext's NextIo surface adds the label writes; the dry run performs none of them.
+  const io = {
+    ...fixture,
+    async postLabel() { throw new Error('postLabel must not run on a dry run'); },
+    async deleteLabel() { throw new Error('deleteLabel must not run on a dry run'); },
+  };
+  const s = await runNext(io as never, { REPO: 'aywengo/mercury', XDG_STATE_HOME: home }, { repo: 'aywengo/mercury', dryRun: true });
+  assert.notEqual(s.rung, 0, 'a head failing only on a recorded flake must not resume through the production entry point');
+});
+
+test('next.ts realIo supplies getText (production flake-guard wiring, review r7)', async () => {
+  // realIo is not exported; pin the contract the same way as postJson: the behavioral test
+  // above proves the runNext path, this line proves the CLI's realIo feeds it.
+  const src = await (await import('node:fs/promises')).readFile('.agents/skills/nightly/next.ts', 'utf8');
+  assert.match(
+    src,
+    /getText: async \(path\) => await ghGetText\(path, token, JOB_LOG_MAX_BYTES\)/,
+    'realIo must wire getText, or the known-flake exemption never takes effect outside tests',
+  );
+});
+
 test('#980: an incomplete review scan does not suppress the red-ci signal (CI is not review evidence)', async () => {
   const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
   const s = await runSelectorWith(redCiIo({

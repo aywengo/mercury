@@ -194,19 +194,28 @@ export function failingTestMentions(output: string): string[] {
  * failing-test names is a real failure (typecheck, plan-tracker and installer jobs rarely name
  * tests) — fail toward resuming, never toward ignoring red CI.
  *
- * Matching is by COMPLETE name (#980 review r5): a substring match let a recorded
- * `retries a flaky request` also suppress `retries a flaky request with invalid credentials` —
- * a DISTINCT test, a real failure. The one explicit normalization is path-shaped: the spec
- * reporter names a file-level failure by the file's path as invoked (the job log carries the
- * worktree's absolute path), while the flake clock records the REPO-relative path
- * (`e2e/knowledge.test.ts`) — so a path mention matches when it ENDS with the recorded path at
- * a `/` segment boundary, never by substring.
+ * Matching is by COMPLETE name, the same key the flake clock records (#980 review r7): a
+ * mentioned test is compared by full-name equality — a suffix match conflates distinct tests
+ * when one name ends with another (a failing test named `e2e/a context-free resume` is
+ * DISTINCT from a recorded flake `a context-free resume`), and a real red head would be
+ * suppressed. The one explicit normalization is path-shaped: the spec reporter names a
+ * file-level failure by the file's path as invoked (the job log carries the worktree's
+ * absolute path), while the flake clock records the REPO-relative path
+ * (`e2e/knowledge.test.ts`) — so an ABSOLUTE path mention normalizes to the recorded
+ * repo-relative key at a `/` segment boundary. A mention that is not an absolute path is a
+ * test name and is compared by equality only.
  */
 export function isFlakeConfinedJob(output: string, flakeTests: string[]): boolean {
   const mentioned = failingTestMentions(output);
   if (mentioned.length === 0) return false;
-  const known = (t: string): boolean =>
-    flakeTests.includes(t) || flakeTests.some((f) => f !== '' && t.endsWith(`/${f}`));
+  const known = (t: string): boolean => {
+    if (flakeTests.includes(t)) return true;
+    // Only a path-shaped mention (the spec reporter's file-level failure line) can differ
+    // from the recorded key: the log carries the worktree-absolute path, the clock records
+    // the repo-relative one. A test name is never suffix-matched (#980 review r7).
+    if (!t.startsWith('/')) return false;
+    return flakeTests.some((f) => f !== '' && !f.startsWith('/') && t.endsWith(`/${f}`));
+  };
   return mentioned.every(known);
 }
 
