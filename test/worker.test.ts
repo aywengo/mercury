@@ -737,6 +737,16 @@ class ResumableFakeAdapter implements AgentAdapter {
   }
 }
 
+/** Mimics the stdio adapters (hermes, claude-code, local, #1012): it offers
+ *  `resume()`, but it never persists `.mercury-session-path`, and a `resume()`
+ *  without a recorded session id throws, just like theirs does. */
+class StdioLikeFakeAdapter extends ResumableFakeAdapter {
+  async resume(runId: string): Promise<AgentHandle> {
+    this.resumeCalls++;
+    throw new Error(`No session id for run ${runId}; use retry-from-scratch`);
+  }
+}
+
 test('p12: cancel of a hanging agent is honored promptly (cancel race)', async () => {
   const repo = tempDir('mercury-p12-');
   const env = makeEnv({
@@ -822,6 +832,41 @@ test('p11: retry falls back to start() when the adapter has no resume support', 
     await waitFor(() => env.runs.get(retry.id)!.status === 'FAILED', 10_000);
     // FakeAgentAdapter has no resume → worker used start() (fresh attempt).
     assert.equal(env.runs.get(retry.id)!.attempt, 2);
+  } finally {
+    env.close();
+  }
+});
+
+test('p11: retry starts fresh by design when the adapter persists no session file (issue #1012)', async () => {
+  // The stdio adapters (hermes, claude-code, local) implement resume(), but they never
+  // persist `.mercury-session-path` — only the RPC adapters do. The worker's retry branch
+  // gates resume() on that file, so for them a retry can never resume: it must start
+  // fresh. Pin that wiring at the worker level, not only at the adapter level.
+  const repo = tempDir('mercury-p11c-');
+  const stdioLike = new StdioLikeFakeAdapter([{ fail: true }]);
+  const env = makeEnv({
+    adapters: { fake: stdioLike },
+  });
+  try {
+    const run = env.runService.create({
+      ownerId: 'alice', task: 'x', agent: 'fake',
+      repository: { localPath: repo },
+    });
+    await waitFor(() => env.runs.get(run.id)!.status === 'FAILED', 10_000);
+    assert.equal(stdioLike.startCalls, 1);
+    // The parent's workspace carries no session pointer — that is what distinguishes
+    // these adapters from prime-agent/RPC.
+    const parent = env.runs.get(run.id)!;
+    assert.ok(parent.workspacePath);
+    assert.equal(existsSync(join(parent.workspacePath!, '.mercury-session-path')), false);
+
+    const retry = env.runService.retry(run.id, 'alice', false);
+    await waitFor(() => env.runs.get(retry.id)!.status === 'FAILED', 10_000);
+    assert.equal(stdioLike.resumeCalls, 0, 'retry must not call resume() when the adapter persisted no session file');
+    assert.equal(stdioLike.startCalls, 2, 'retry must start fresh');
+    assert.equal(env.runs.get(retry.id)!.attempt, 2);
+    const types = env.events.list(retry.id).map((e) => e.type);
+    assert.ok(!types.includes('run.resuming'), 'no run.resuming event on a fresh start');
   } finally {
     env.close();
   }
