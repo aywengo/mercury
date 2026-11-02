@@ -1146,6 +1146,20 @@ handle. A `run.resuming` event is emitted when a retry resumes. Worker tests:
 fail → retry → assert `resume()` called with the parent session file; and
 retry falls back to `start()` when the adapter has no `resume()`.
 
+**Cross-process resume requires a persisted session file.** The retry branch
+only calls `resume()` when the parent's workspace carries
+`.mercury-session-path`. Only the RPC adapters (RpcAgentAdapter,
+PrimeAgentAdapter) persist it. The stdio adapters (hermes, claude-code,
+local) never do: their `resume()` resolves the session from state the retry
+does not have — an in-memory session id, or a session-id file inside the
+run's own fresh workspace — so a cross-process retry can never find one. For
+those adapters the retry branch always takes the "no parent session file"
+path and starts fresh by design (#1012); the worker test
+`p11: retry starts fresh by design when the adapter persists no session file`
+pins that wiring so it cannot silently fall back the other way. Making
+cross-process resume work for them is the "Session persistence" item in the
+§7 table, not a worker change.
+
 **Gap 2 — cancel of a hanging agent races the events iterator. ✅ fixed.** The
 worker's drive loop checked `isCancellationRequested(run.id)` only at the top
 of the loop, then blocked in `await iterator.next()`. An agent that hangs
