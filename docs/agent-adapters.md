@@ -1150,8 +1150,9 @@ retry falls back to `start()` when the adapter has no `resume()`.
 only calls `resume()` when the parent's workspace carries
 `.mercury-session-path`. Only the RPC adapters (RpcAgentAdapter,
 PrimeAgentAdapter) persist it. The stdio adapters (hermes, claude-code,
-local) never do: their `resume()` resolves the session from in-memory state,
-which a fresh worker process — or a retry's fresh runId — does not have. For
+local) never do: their `resume()` resolves the session from state the retry
+does not have — an in-memory session id, or a session-id file inside the
+run's own fresh workspace — so a cross-process retry can never find one. For
 those adapters the retry branch always takes the "no parent session file"
 path and starts fresh by design (#1012); the worker test
 `p11: retry starts fresh by design when the adapter persists no session file`
