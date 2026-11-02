@@ -41,6 +41,7 @@ Record: [`docs/host-installer.md`](docs/host-installer.md)
 | #1071 | host service install writes a host unit with no worker: a fresh host queues Runs forever | done | #1072 |
 | #1074 | a fresh host cannot run: the service units drop the user bin from PATH, and nothing creates the data directory | done | #1075 |
 | #1078 | workflows are unreachable on a running host: the registry is never built, and there is no per-host directory | done | #1079 |
+| #1095 | e2e: fleetBots writes its Runs into the live host database (`MERCURY_DATA_DIR` is not a variable) | done | #1096 |
 | #1029 | release: the formula push to main is refused by the ruleset, so every release leaves Homebrew… | done | #1046 |
 | #1045 | release: a failed curl probe yields HTTP 000000 in the release notes (and the test stub hides it) | done | #1047 |
 
@@ -57,7 +58,7 @@ Record: [`docs/nightly-self-development.md`](docs/nightly-self-development.md)
 | #740 | `nightly-next` skill (N1-3) | done | #767 |
 | #741 | `nightly-report` skill (N1-4) | done | #768 |
 | #742 | Nightly bot config and first-night checklist (N1-5) | done | #774 |
-| #860 | nightly: derive the review-cap hand-off from current-head findings, not every round | in progress | #966 |
+| #860 | nightly: derive the review-cap hand-off from current-head findings, not every round | done | #966 |
 | #881 | nightly: rung 4 files duplicate proposals; dedupe by source key before filing | done | #984 |
 | #964 | nightly: report lists a one-night flake forever; the flake entry carries an absolute wo… | done | #1013 |
 | #968 | nightly: resume PRs on the owner's changes-requested review, not only on Copilot findings | done | #969 |
