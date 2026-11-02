@@ -83,26 +83,48 @@ function encodedVariants(values: string[]): string[] {
   return [...out];
 }
 
-/** ENOENT is the only error a traversal may read as "nothing here": every other code means the
- * pass did not read everything, and that must surface instead of being stamped complete (#976). */
+/** ENOENT is the only error a traversal may read as "nothing here": a file or directory that
+ * vanished mid-pass holds no content to leak. Every other code means the pass did not read
+ * everything, and that must surface instead of being stamped complete (#976). */
 function enoent(err: unknown): boolean {
   return (err as { code?: string } | undefined)?.code === 'ENOENT';
 }
 
+export interface ArtifactRedactionFailure {
+  /** The directory or file the pass could not read or write. */
+  path: string;
+  /** The errno code (EACCES, EIO, ...) when the runtime gave one. */
+  code?: string;
+}
+
+export interface ArtifactRedactionResult {
+  /** Files whose content was rewritten. */
+  scrubbed: number;
+  /** Entries the pass could not read or write: non-empty means the pass is INCOMPLETE and a
+   * caller that stamps runs must withhold its stamp (#976). */
+  failures: ArtifactRedactionFailure[];
+}
+
 /**
- * Recursively scrub every file under the artifact dirs. Returns the number of files changed.
+ * Recursively scrub every file under the artifact dirs. Returns the pass result: the number of
+ * files changed, and the entries the pass could not read or write.
  *
- * A traversal that cannot read a directory or file (EACCES on an unreadable subdirectory)
- * THROWS rather than skipping: a pass that did not read everything is incomplete, and a caller
- * that stamps runs must only stamp a complete pass (#976).
+ * An entry the pass cannot read (EACCES on an unreadable subdirectory) or write is COLLECTED,
+ * not thrown: the pass continues through the accessible files and the remaining artifact roots,
+ * so readable secrets are still scrubbed, and `failures` reports the gap. A caller that stamps
+ * runs must only stamp a complete pass (#976).
  */
 export function redactRunArtifacts(
   workspacePath: string,
   secrets: string[],
   options: RedactArtifactsOptions = {},
-): number {
+): ArtifactRedactionResult {
+  const failures: ArtifactRedactionFailure[] = [];
+  const fail = (path: string, err: unknown): void => {
+    failures.push({ path, code: (err as { code?: string } | undefined)?.code });
+  };
   const values = secrets.filter((s) => s.length > 0);
-  if (values.length === 0) return 0;
+  if (values.length === 0) return { scrubbed: 0, failures };
   // The needle set covers encoded copies (base64 of the value and of the x-access-token pair),
   // so a transcript that only carries the credential in a git URL survives no better than one
   // carrying it raw.
@@ -115,37 +137,50 @@ export function redactRunArtifacts(
   for (const dir of ARTIFACT_DIRS) {
     const root = join(workspacePath, dir);
     scrubbed += walk(root, (path) => {
-      let size: number;
+      let buf: Buffer;
       try {
-        size = statSync(path).size;
+        const size = statSync(path).size;
+        if (size > maxFileBytes) {
+          options.onSkip?.(path, size);
+          return false;
+        }
+        buf = readFileSync(path);
       } catch (err) {
-        if (!enoent(err)) throw err; // unreadable file: an incomplete pass must not report success (#976)
-        return false; // vanished between readdir and stat: nothing to scrub
-      }
-      if (size > maxFileBytes) {
-        options.onSkip?.(path, size);
+        if (enoent(err)) return false; // vanished between readdir and read: nothing to scrub
+        fail(path, err); // unreadable file: collect and continue, the pass is incomplete (#976)
         return false;
       }
-      const buf = readFileSync(path);
       if (isBinary(buf)) {
         let out: Buffer | null = null;
         for (const secret of needles) {
           const next = redactBytes(out ?? buf, secret);
           if (next) out = next;
         }
-        if (out) writeFileSync(path, out);
+        if (out) {
+          try {
+            writeFileSync(path, out);
+          } catch (err) {
+            if (!enoent(err)) fail(path, err); // vanished before the write: the secret left with it
+            return false;
+          }
+        }
         return out !== null;
       }
       const text = buf.toString('utf8');
       const redacted = redactor.redact(text);
       if (redacted !== text) {
-        writeFileSync(path, redacted, 'utf8');
+        try {
+          writeFileSync(path, redacted, 'utf8');
+        } catch (err) {
+          if (!enoent(err)) fail(path, err);
+          return false;
+        }
         return true;
       }
       return false;
     });
   }
-  return scrubbed;
+  return { scrubbed, failures };
 
   function walk(dir: string, fn: (path: string) => boolean): number {
     let entries;
@@ -153,9 +188,11 @@ export function redactRunArtifacts(
       entries = readdirSync(dir, { withFileTypes: true });
     } catch (err) {
       if (enoent(err)) return 0; // no artifacts of this kind: nothing to do
-      // A directory the pass could not read is NOT "no artifacts": the pass is incomplete,
-      // and the caller must not treat it as complete (#976).
-      throw err;
+      // A directory the pass could not read is NOT "no artifacts": collect it, continue with
+      // the accessible siblings and the remaining artifact roots, and let the caller withhold
+      // the stamp on the incomplete pass (#976).
+      fail(dir, err);
+      return 0;
     }
     let count = 0;
     for (const entry of entries) {

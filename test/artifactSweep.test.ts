@@ -166,13 +166,19 @@ test('an unreadable subdirectory leaves the run unstamped, and the next start re
       mkdirSync(locked, { recursive: true });
       const file = join(locked, 'session.jsonl');
       writeFileSync(file, JSON.stringify({ type: 'agent.message', text: `using token ${TOKEN}` }) + '\n');
+      // A readable sibling in the same root: scrubbed on the FIRST pass even though the locked
+      // directory cannot be read (review on #976).
+      const sibling = writeTranscript(workspace, TOKEN);
       const runId = makeReapedRun(env, workspace);
       // A subdirectory the sweep cannot list: readdir EACCES mid-pass.
       chmodSync(locked, 0o000);
 
       env.worker.start();
 
-      // The pass could not read everything, so the run is NOT stamped: the next start retries
+      // The pass continued through the readable entries, so the sibling is already scrubbed...
+      const siblingContent = readFileSync(sibling, 'utf8');
+      assert.ok(!siblingContent.includes(TOKEN), 'accessible artifacts are scrubbed despite the unreadable directory');
+      // ...but it could not read everything, so the run is NOT stamped: the next start retries
       // it instead of the secrets sitting on disk with nothing left to do.
       const stamped = env.db
         .prepare('SELECT artifacts_swept_at FROM runs WHERE id = ?').get(runId) as { artifacts_swept_at: string | null };

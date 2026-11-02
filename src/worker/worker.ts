@@ -912,20 +912,29 @@ await this.finalize(run, outcome, skills);
 
   /**
    * Best-effort at-rest redaction of the Run's agent artifacts (issue #944). Runs after the
-   * agent process is gone, so the files are stable. Returns whether the pass completed
-   * without throwing -- the start-up sweep only stamps a run swept in that case (#976).
+   * agent process is gone, so the files are stable. Returns whether the pass read everything
+   * -- the start-up sweep only stamps a run swept in that case (#976). Unreadable entries are
+   * collected, not thrown: the pass scrubs what it can reach, and the failures stay in the log
+   * so the retry on the next start has something to read.
    */
   private scrubArtifacts(runId: string, path: string): boolean {
     const secrets = this.deps.artifactSecrets;
     if (!secrets || secrets.length === 0) return true;
     try {
-      const scrubbed = redactRunArtifacts(path, secrets, {
+      const { scrubbed, failures } = redactRunArtifacts(path, secrets, {
         onSkip: (file, size) => {
           this.log('warn', 'artifact too large for redaction; skipped', { runId, file, size });
         },
       });
       if (scrubbed > 0) {
         this.log('info', 'redacted secrets from agent artifacts', { runId, files: scrubbed });
+      }
+      if (failures.length > 0) {
+        this.log('warn', 'artifact redaction incomplete; the unreadable entries are left for the next pass', {
+          runId,
+          failures,
+        });
+        return false;
       }
       return true;
     } catch (scrubErr) {
