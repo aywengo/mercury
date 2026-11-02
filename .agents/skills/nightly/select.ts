@@ -49,7 +49,8 @@
  */
 
 import { basename } from 'node:path';
-import { REPO_RE, CLAIM_RELEASED_MARKER, ghToken, ghGet as ghGetRaw, ghPost as ghPostRaw, ghDelete as ghDeleteRaw, FETCH_TIMEOUT_MS } from './shared.ts';
+import { readFileSync } from 'node:fs';
+import { REPO_RE, CLAIM_RELEASED_MARKER, ghToken, ghGet as ghGetRaw, ghGetText, ghPost as ghPostRaw, ghDelete as ghDeleteRaw, FETCH_TIMEOUT_MS } from './shared.ts';
 
 const TRUSTED_AUTHOR = 'aywengo';
 /** The hosted Copilot reviewer's exact login (aywengo/mercury reviews). Exact match everywhere:
@@ -116,11 +117,204 @@ export interface ResumeCandidate {
    *  the run resumes fix-loop step 5 on the issue.
    *  'owner-changes' = the owner's LATEST deciding review requests changes on THIS head (no
    *  commit pushed since), whether its remarks are inline or only in the review body (#968).
-   *  It outranks Copilot findings: the owner's review is the one that gates the merge. */
-  state: 'findings' | 'owner-changes';
+   *  It outranks Copilot findings: the owner's review is the one that gates the merge.
+   *  'red-ci' = the required aggregate `ci` check on THIS head completed with conclusion
+   *  failure (#980): the bot's own PR is red, and no review should be needed to say so. It
+   *  outranks Copilot findings; owner change requests still outrank it. */
+  state: 'findings' | 'owner-changes' | 'red-ci';
+  /** red-ci only: the failing job names on this head, comma-joined, for the selection reason. */
+  failingJobs?: string;
   /** Older first: with two open PRs for one issue the OLDER one is continued (the acceptance
    *  rule) and the newer must be superseded or closed by the Run. */
   createdAt: string;
+}
+
+// ---- red CI on the head (#980) ----
+
+/** The required aggregate check's exact job name (.github/workflows/ci.yml, job `ci`). */
+export const RED_CI_CHECK = 'ci';
+
+/** Recorded-shape check run (fields the selector reads). */
+export interface CheckRunShim {
+  name?: string | null;
+  status?: string | null;
+  conclusion?: string | null;
+  /** Integration-supplied identifier (#980 review r8): the Actions integration puts the numeric
+   *  job id here, but other integrations put opaque values (a UUID is the common shape). Resolve
+   *  through actionsJobId, never parse this directly. */
+  external_id?: string | null;
+  /** Where the check's details live. For an Actions job this is
+   *  `https://github.com/<owner>/<repo>/actions/runs/<runId>/jobs/<jobId>` — the fallback source
+   *  of the numeric job id when external_id is opaque (#980 review r8). */
+  details_url?: string | null;
+}
+
+/**
+ * The numeric Actions job id behind a check run, or null when none can be resolved
+ * (#980 review r8). The Checks API's `external_id` is an INTEGRATION-SUPPLIED identifier: the
+ * Actions integration reports the job id (numeric), any other integration reports whatever it
+ * wants (commonly a UUID). An opaque external_id has no job log at the actions/jobs endpoint —
+ * but the Actions check run still names its job in `details_url`, and that is where the id is
+ * recovered from. Nothing resolvable (opaque id, no Actions details_url, non-Actions check) is
+ * null: the caller treats that as an unreadable log and fails toward resuming, the same as a
+ * fetch failure.
+ */
+export function actionsJobId(run: Pick<CheckRunShim, 'external_id' | 'details_url'>): string | null {
+  const ext = run.external_id;
+  if (typeof ext === 'string' || typeof ext === 'number') {
+    const s = String(ext);
+    if (/^\d+$/.test(s)) return s;
+  }
+  const url = typeof run.details_url === 'string' ? run.details_url : '';
+  const m = url.match(/\/actions\/runs\/\d+\/jobs\/(\d+)/);
+  return m ? m[1] : null;
+}
+
+/** Conclusions that mean a job did NOT succeed but also do NOT mean "wait" (#980 review r1):
+ * a plain failure, a timeout (the job hit the CI limit and the `ci` aggregate still completes
+ * with `failure`) or a cancellation. A check still running, or with an unknown conclusion, is
+ * not in this set: those mean wait for the verdict. */
+export const FAILING_CONCLUSIONS: readonly string[] = ['failure', 'timed_out', 'cancelled'];
+
+/**
+ * The failing job names under the required aggregate check on one head, or null when there is
+ * NO signal: the aggregate check absent, still running (wait for the verdict, acceptance 2), or
+ * not failed. Only a COMPLETED aggregate with conclusion `failure` is a red-CI resume signal
+ * (#980); the failing jobs are the OTHER check runs with a failing conclusion on the same head
+ * — a job that timed out or was cancelled is a failing job too, and its name belongs in the
+ * selection reason (#980 review r1). An EMPTY list is also a signal: the aggregate failed but
+ * no sibling job could be named — the caller reports it as `unknown job`, it never waits.
+ */
+export function redCiJobs(checkRuns: CheckRunShim[]): string[] | null {
+  const ci = checkRuns.find((c) => c.name === RED_CI_CHECK);
+  if (!ci || ci.status !== 'completed' || ci.conclusion !== 'failure') return null;
+  return checkRuns
+    .filter((c) => c.name !== undefined && c.name !== null && c.name !== RED_CI_CHECK && FAILING_CONCLUSIONS.includes(c.conclusion ?? ''))
+    .map((c) => c.name!);
+}
+
+/**
+ * Failing-test names mentioned in reporter output: node --test's spec reporter marks a failing
+ * test `✖ <name> (<duration>)` — the duration is REQUIRED, so the reporter's own `✖ failing
+ * tests:` heading, the `▶` suite headings and the `ℹ fail N` summary lines never parse as
+ * names — and TAP marks it `not ok <n> - <name>`. Deduplicated in first-seen order. Used only
+ * for the known-flake guard (#980 acceptance 5) — a job whose every named failing test is a
+ * recorded flake does not trigger a red-CI resume on its own.
+ */
+export function failingTestMentions(output: string): string[] {
+  const names: string[] = [];
+  for (const raw of output.split('\n')) {
+    // A raw Actions job log prefixes EVERY line with `<ts>Z ` (e.g.
+    // `2026-11-01T00:31:03.2345678Z `); bare reporter output (tests, fixtures) has no prefix.
+    const line = raw.replace(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\s+/, '');
+    const spec = line.match(/^\s*(?:✖|✗)\s+(.+?)\s+\(\d+(?:\.\d+)?\s*m?s\)\s*$/);
+    const tap = line.match(/^\s*not ok \d+\s*-\s*(.+?)\s*$/);
+    const name = (spec?.[1] ?? tap?.[1] ?? '').trim();
+    if (name !== '' && !names.includes(name)) names.push(name);
+  }
+  return names;
+}
+
+/**
+ * Whether one failing job's LOG mentions ONLY known-flake tests. A job with no extractable
+ * failing-test names is a real failure (typecheck, plan-tracker and installer jobs rarely name
+ * tests) — fail toward resuming, never toward ignoring red CI.
+ *
+ * Matching is by COMPLETE name, the same key the flake clock records (#980 review r7): a
+ * mentioned test is compared by full-name equality — a suffix match conflates distinct tests
+ * when one name ends with another (a failing test named `e2e/a context-free resume` is
+ * DISTINCT from a recorded flake `a context-free resume`), and a real red head would be
+ * suppressed. The one explicit normalization is path-shaped: the spec reporter names a
+ * file-level failure by the file's path as invoked (the job log carries the worktree's
+ * absolute path), while the flake clock records the REPO-relative path
+ * (`e2e/knowledge.test.ts`) — so an ABSOLUTE path mention normalizes to the recorded
+ * repo-relative key at a `/` segment boundary. A mention that is not an absolute path is a
+ * test name and is compared by equality only.
+ */
+export function isFlakeConfinedJob(output: string, flakeTests: string[]): boolean {
+  const mentioned = failingTestMentions(output);
+  if (mentioned.length === 0) return false;
+  const known = (t: string): boolean => {
+    if (flakeTests.includes(t)) return true;
+    // Only a path-shaped mention (the spec reporter's file-level failure line) can differ
+    // from the recorded key: the log carries the worktree-absolute path, the clock records
+    // the repo-relative one. A test name is never suffix-matched (#980 review r7).
+    if (!t.startsWith('/')) return false;
+    return flakeTests.some((f) => f !== '' && !f.startsWith('/') && t.endsWith(`/${f}`));
+  };
+  return mentioned.every(known);
+}
+
+/**
+ * The nightly flake-clock state's recorded test names (the file e2e.ts writes at
+ * `<state-home>/mercury/nightly/e2e-flakes.json`, one entry per fingerprint). A missing, corrupt
+ * or unreadable file yields NO known flakes: the red-CI resume fires (fail toward acting on red
+ * CI, never toward ignoring it). An entry is accepted with the SAME shape check as
+ * e2e.ts::loadFlakeState (`test` string, `error` string, `nights` array of strings): a
+ * valid-JSON-but-corrupt record is not a recorded flake, so it cannot suppress a resume
+ * (#980 review r6).
+ */
+export function loadFlakeTestNames(env: NodeJS.ProcessEnv, read?: (p: string) => string): string[] {
+  const base = env.XDG_STATE_HOME?.trim() !== '' && env.XDG_STATE_HOME ? env.XDG_STATE_HOME.trim()
+    : env.HOME?.trim() !== '' && env.HOME ? `${env.HOME.trim()}/.local/state` : '';
+  if (base === '') return [];
+  const p = `${base}/mercury/nightly/e2e-flakes.json`;
+  let raw: unknown;
+  try {
+    raw = JSON.parse((read ?? ((path: string) => readFileSync(path, 'utf8')))(p));
+  } catch {
+    return [];
+  }
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return [];
+  const names: string[] = [];
+  for (const entry of Object.values(raw as Record<string, unknown>)) {
+    if (entry === null || typeof entry !== 'object') continue;
+    const e = entry as { test?: unknown; error?: unknown; nights?: unknown };
+    if (typeof e.test !== 'string' || e.test === '' || typeof e.error !== 'string' || !Array.isArray(e.nights)) continue;
+    if (!e.nights.every((n) => typeof n === 'string')) continue;
+    names.push(e.test);
+  }
+  return names;
+}
+
+/** How much of one job log the selector reads (the known-flake guard scans line by line; the
+ * failing-test markers of an `npm test` run sit far inside this cap). */
+export const JOB_LOG_MAX_BYTES = 2 * 1024 * 1024;
+
+/**
+ * The bounded log of the failed Actions job behind a check run (#980 review r2): the known-flake
+ * exemption is decided from the failing test names taken from the failed job's LOG — the job
+ * name or the check run's output fields alone cannot name the failing tests. An unreadable log
+ * is a REAL failure: the caller resumes, it does not excuse the head.
+ *
+ * `jobId` is the RESOLVED numeric Actions job id (actionsJobId, #980 review r8): the check
+ * run's raw `external_id` is an integration-supplied identifier and is not trusted here. The
+ * log endpoint 302-redirects to a signed URL and node's fetch follows it (verified 2026-11-01).
+ * Bounds: FETCH_TIMEOUT_MS per fetch and JOB_LOG_MAX_BYTES of text. null = no log (missing
+ * transport, unresolvable or non-numeric id, fetch failure, non-2xx, or a body past the cap —
+ * truncated evidence cannot exonerate a head, #980 review r5) — the caller treats that as a
+ * real failure.
+ */
+export async function fetchJobLog(
+  io: { getText?: (path: string) => Promise<{ status: number; text: string } | null> },
+  repo: string,
+  jobId: unknown,
+): Promise<string | null> {
+  if (!io.getText) return null;
+  if (typeof jobId !== 'string' && typeof jobId !== 'number') return null;
+  const id = String(jobId);
+  if (!/^\d+$/.test(id)) return null; // an Actions job id is numeric; anything else has no job log here
+  try {
+    const res = await io.getText(`/repos/${repo}/actions/jobs/${id}/logs`);
+    if (res === null || res.status < 200 || res.status >= 300) return null;
+    // The same policy as ghGetText's cap: a body PAST the cap is truncated evidence, and
+    // truncated evidence cannot establish a flake-only failure — a real failure after the cap
+    // would otherwise be exonerated by a flake marker in the returned prefix (#980 review r5).
+    if (res.text.length > JOB_LOG_MAX_BYTES) return null;
+    return res.text;
+  } catch {
+    return null;
+  }
 }
 
 export function issueLabels(issue: GhIssue): string[] {
@@ -264,13 +458,16 @@ export function selectLadder(
       const top = byIssue.get(r.issue);
       if (top === undefined || r.createdAt < top.createdAt) byIssue.set(r.issue, r);
     }
-    // Owner change requests first (#968), then Copilot findings; oldest-first within each.
-    const rank = (r: ResumeCandidate): number => (r.state === 'owner-changes' ? 0 : 1);
+    // Owner change requests first (#968), then red ci (#980), then Copilot findings;
+    // oldest-first within each tier.
+    const rank = (r: ResumeCandidate): number => (r.state === 'owner-changes' ? 0 : r.state === 'red-ci' ? 1 : 2);
     const ordered = [...byIssue.entries()].sort((a, b) => rank(a[1]) - rank(b[1]) || a[1].createdAt.localeCompare(b[1].createdAt));
     if (ordered.length > 0) {
       const [issue, r] = ordered[0]!;
       const what = r.state === 'owner-changes'
         ? `has @${TRUSTED_AUTHOR}'s changes-requested review on its head to address (review body and any inline threads)`
+        : r.state === 'red-ci'
+        ? `has red ci on head ${r.headSha}: ${r.failingJobs ?? 'unknown job'}`
         : 'has Copilot findings on its head to address';
       return {
         rung: 0,
@@ -641,6 +838,11 @@ export async function runSelectorWith(
      *  Optional: ABSENT means the pending-findings check cannot run, so resume candidates
      *  fail closed (no resume) while their issues stay reserved from new work. */
     postJson?: (path: string, body: unknown) => Promise<{ body: unknown; status: number }>;
+    /** Plain-text GET (the Actions job log, which redirects to a signed URL and is not JSON).
+     *  Optional: ABSENT means no job log can be fetched, so the known-flake guard cannot
+     *  exonerate a failing job — every failing job is a real failure and the red-CI resume
+     *  fires (fail toward resuming, #980 review r2). */
+    getText?: (path: string) => Promise<{ status: number; text: string } | null>;
   },
   env: NodeJS.ProcessEnv,
   dryRun: boolean,
@@ -900,16 +1102,89 @@ export async function runSelectorWith(
         // of the current-head filter for the resume scan AND next.ts's `blocked --pr`.
         const headState = await copilotHeadState(io as unknown as Parameters<typeof copilotHeadState>[0], repo, pr.number, headSha);
         const lastCopilot = headState.lastCopilot;
-        if (!headState.complete) continue; // fail closed for THIS PR: no resume, but the issue stays reserved
         // Owner change request on the CURRENT head (#968): resume regardless of Copilot. A commit
         // pushed after the review moves the head, so an answered review waits for re-review
-        // instead of being resumed again. Excluded issues never resume.
+        // instead of being resumed again. Owner precedence applies only when the review evidence
+        // is COMPLETE — an incomplete scan cannot decide whose review is the latest (#980
+        // review r5). Excluded issues never resume.
         const lastOwner = headState.lastOwner;
-        if (lastOwner !== null && lastOwner.state === 'CHANGES_REQUESTED' && lastOwner.commit_id === headSha
+        if (headState.complete && lastOwner !== null && lastOwner.state === 'CHANGES_REQUESTED' && lastOwner.commit_id === headSha
           && !isExcluded(issueCandidate.issue)) {
           resume.push({ issue, prNumber: pr.number, headSha, state: 'owner-changes', createdAt: pr.created_at ?? '' });
           continue;
         }
+        // Red CI on the CURRENT head (#980): the required aggregate check completed with
+        // conclusion failure. Check runs are GitHub metadata (names, statuses, conclusions and
+        // the Actions job id) — never PR or comment text. The known-flake guard reads the
+        // failing job's LOG through that id (#980 review r2).
+        // CI state is NOT review evidence (#980 review r5): this scan runs even when the review
+        // scan is incomplete — a readable, completed failing `ci` check is a signal whatever the
+        // thread query did. A capped or failed CHECK-RUNS scan fails closed for this PR's red-ci
+        // signal only; the issue stays reserved from new work either way.
+        {
+          let crPath: string | null = `/repos/${repo}/commits/${headSha}/check-runs?per_page=100`;
+          const checkRuns: CheckRunShim[] = [];
+          let crPages = 0;
+          let crComplete = false;
+          try {
+            while (crPath && crPages < 3) {
+              const { body, link } = (await io.get(crPath)) as { body: { check_runs?: CheckRunShim[] }; link?: string | null };
+              checkRuns.push(...(body.check_runs ?? []));
+              crPages++;
+              const next = link?.match(/<([^>]+)>;\s*rel="next"/)?.[1]?.replace('https://api.github.com', '') ?? null;
+              // Stay on this resource: a next-link for a different list must not redirect the walk.
+              crPath = next !== null && next.startsWith('/repos/') && next.includes('/check-runs?') ? next : null;
+            }
+            crComplete = !crPath;
+          } catch (e) {
+            console.error(`resume scan: PR #${pr.number} check-runs failed: ${String(e instanceof Error ? e.message : e)}`);
+          }
+          if (crComplete) {
+            const failing = redCiJobs(checkRuns);
+            if (failing !== null) {
+              const flakeTests = loadFlakeTestNames(env);
+              const byName = new Map(checkRuns.filter((c) => typeof c.name === 'string').map((c) => [c.name!, c]));
+              // The flake exemption is decided per job from the failed job's LOG (#980 review
+              // r2): the job name or the check-run output fields alone cannot name the failing
+              // tests. An unreadable log (no Actions id, no getText, fetch failure, non-2xx) is
+              // a real failure — the job stays in, fail toward resuming.
+              const real: string[] = [];
+              for (const job of failing) {
+                const run = byName.get(job);
+                // Only a job that concluded `failure` can be flake-confined (#980 review r5):
+                // a job that TIMED OUT or was CANCELLED is interrupted execution — its log may
+                // print a known-flake marker and then hang — so it stays a real failure no
+                // matter what the log says. A missing run or an unknown conclusion: the same,
+                // fail toward resuming.
+                if (run?.conclusion !== 'failure') {
+                  real.push(job);
+                  continue;
+                }
+                const log = await fetchJobLog(io, repo, run ? actionsJobId(run) : null);
+                if (log !== null && isFlakeConfinedJob(log, flakeTests)) {
+                  console.error(`resume scan: PR #${pr.number} job '${job}' confined to known flakes; not a signal on its own`);
+                } else {
+                  real.push(job);
+                }
+              }
+              // An empty `failing` list is the failed aggregate itself: no sibling job could be
+              // named, and that is still a red head (reported as `unknown job`) — never a wait
+              // (#980 review r1).
+              if (real.length > 0 || failing.length === 0) {
+                resume.push({ issue, prNumber: pr.number, headSha, state: 'red-ci', createdAt: pr.created_at ?? '', failingJobs: real.length > 0 ? real.join(', ') : undefined });
+                continue;
+              }
+              // Every failing job is confined to known flakes (#980 acceptance 5): not a
+              // signal on its own — fall through so a Copilot review can still decide.
+            }
+          } else {
+            console.error(`resume scan: PR #${pr.number} check-runs capped; red ci not evaluated`);
+          }
+        }
+        // The review-based signal (Copilot findings) needs the COMPLETE review scan: an
+        // incomplete scan fails closed for THIS PR — no findings resume, but the issue stays
+        // reserved from new work (#980 review r5).
+        if (!headState.complete) continue;
         const hasHeadReview = lastCopilot !== null && lastCopilot.commit_id === headSha;
         if (!hasHeadReview || lastCopilot === null) continue; // relay fetches the review first
         if (lastCopilot.state === 'APPROVED') continue; // awaiting merge; not resume work
@@ -1034,6 +1309,7 @@ export async function runSelector(repo: string, env: NodeJS.ProcessEnv, dryRun: 
   return runSelectorWith(
     {
       get: async (path) => await ghGet(path, token),
+      getText: async (path) => await ghGetText(path, token, JOB_LOG_MAX_BYTES),
       post: (path, body) => ghPost(path, body, token),
       postJson: async (path, body) => await ghPostRaw(path, body, token),
       del: async (path) => {

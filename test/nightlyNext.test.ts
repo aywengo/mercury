@@ -230,6 +230,80 @@ test('a non-2xx read fails loud instead of surfacing as a parse error', async ()
   await assert.rejects(() => runNext(failingIo, ENV, { repo: REPO, dryRun: false }), /GET .* -> 500/);
 });
 
+/** A nightly PR whose head is red: the only failing job's log names a RECORDED flake.
+ * `withGetText` wires the job-log transport into the NextIo (the production shape after the
+ * #980 review r5 fix). Claim events are recorded on the timeline so a rung-0 claim verifies. */
+function redHeadIo(withGetText: boolean): { io: NextIo; logCalls: string[]; claimCount: { n: number } } {
+  const logCalls: string[] = [];
+  const claimCount = { n: 0 };
+  const claimEvents: LabelEvent[] = [];
+  const io: NextIo = {
+    async get(path) {
+      if (path.startsWith(`/repos/${REPO}/issues?`)) {
+        return { body: [issue({ number: 965, user: { login: 'aywengo' } })], status: 200, link: null };
+      }
+      if (path.startsWith(`/repos/${REPO}/pulls?`)) {
+        return { body: [{ number: 1965, user: { login: 'mercury-nightly' }, created_at: '2026-10-15T22:35:00Z', head: { sha: 'sha965', ref: 'fix/issue-965-red-ci' } }], status: 200, link: null };
+      }
+      if (path.includes('/pulls/1965/reviews')) return { body: [], status: 200, link: null };
+      if (path.includes('/check-runs?')) {
+        return { body: { check_runs: [
+          { name: 'ci', status: 'completed', conclusion: 'failure' },
+          { name: 'test (node 22.18.0)', status: 'completed', conclusion: 'failure', external_id: '9001' },
+        ] }, status: 200, link: null };
+      }
+      if (path.includes('/timeline')) return { body: claimEvents, status: 200, link: null };
+      return { body: [], status: 200 };
+    },
+    async post() { return { body: {}, status: 201 }; },
+    async postLabel(path, body) {
+      const m = path.match(/\/issues\/(\d+)\/+labels$/);
+      if (m) {
+        claimCount.n++;
+        claimEvents.push({ event: 'labeled', actor: { login: 'mercury-nightly' }, label: { name: (body as { labels: string[] }).labels[0] } } as unknown as LabelEvent);
+      }
+      return true;
+    },
+    async deleteLabel() { return true; },
+    async postJson() {
+      return { status: 200, body: { data: { repository: { pullRequest: { reviewThreads: { totalCount: 0, pageInfo: { hasNextPage: false }, nodes: [] } } } } } };
+    },
+  };
+  if (withGetText) {
+    io.getText = async (path) => {
+      logCalls.push(path);
+      return { status: 200, text: '✖ e2e/retries a flaky request (12.3ms)' };
+    };
+  }
+  return { io, logCalls, claimCount };
+}
+
+test('#980: runNext forwards the job-log transport, so the flake guard works in production (review r5)', async () => {
+  const { writeFileSync, mkdirSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const { tempDir } = await import('./helpers.ts');
+  const home = tempDir('nightly-next-flake-');
+  mkdirSync(join(home, 'mercury', 'nightly'), { recursive: true });
+  writeFileSync(join(home, 'mercury', 'nightly', 'e2e-flakes.json'), JSON.stringify({
+    fp1: { test: 'e2e/retries a flaky request', error: 'timeout', nights: ['2026-10-16'] },
+  }));
+  const env = { GH_TOKEN: 'test-token', XDG_STATE_HOME: home };
+  // WITH the transport: the flake-only head is exonerated from the production entry point —
+  // no rung-0 resume, nothing claimed.
+  const withTransport = redHeadIo(true);
+  const out = await runNext(withTransport.io, env, { repo: REPO, dryRun: false });
+  assert.notEqual(out.rung, 0, 'a head failing only on a recorded flake does not resume');
+  assert.equal(withTransport.claimCount.n, 0, 'no claim when the flake guard exonerates the head');
+  assert.ok(withTransport.logCalls.some((p) => p === `/repos/${REPO}/actions/jobs/9001/logs`),
+    'the selector read the failing job\'s log through NextIo.getText');
+  // WITHOUT the transport: the guard cannot exonerate — every failing job stays a real failure.
+  const withoutTransport = redHeadIo(false);
+  const out2 = await runNext(withoutTransport.io, env, { repo: REPO, dryRun: false });
+  assert.equal(out2.rung, 0, 'no log transport: the failing job is real and the head resumes');
+  assert.equal(out2.issue, 965);
+  assert.equal(out2.action, 'fix-loop');
+});
+
 test('a 422 that is NOT already-exists fails hard (a blocked exit must not proceed label-less)', async () => {
   // The real transport maps only already_exists 422s to false; simulate the throw via postLabel.
   const { io, calls } = ioWith([], {});
