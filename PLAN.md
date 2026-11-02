@@ -62,7 +62,7 @@ Record: [`docs/nightly-self-development.md`](docs/nightly-self-development.md)
 | #881 | nightly: rung 4 files duplicate proposals; dedupe by source key before filing | done | #984 |
 | #964 | nightly: report lists a one-night flake forever; the flake entry carries an absolute wo… | done | #1013 |
 | #968 | nightly: resume PRs on the owner's changes-requested review, not only on Copilot findings | done | #969 |
-| #980 | nightly: resume its own PRs when the required ci check is red, not only on reviews | in progress | #981 |
+| #980 | nightly: resume its own PRs when the required ci check is red, not only on reviews | done | #981 |
 | #1020 | nightly: nothing notices a night with no report (host down 2026-10-19→20) | done | #1021 |
 | #1015 | nightly: resume its own PRs when the head is conflicted with main | open | — |
 | #1092 | nightly report: a "Waiting on you" section for nightly PRs with no review on their current head | open | — |

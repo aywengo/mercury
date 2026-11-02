@@ -38,9 +38,9 @@
 import { basename } from 'node:path';
 
 import { checkModel, defaultApiKey, defaultEndpoint, resolveTaskModel, type ModelCheck } from './model.ts';
-import { copilotHeadState, runSelectorWith, type E2eGateState } from './select.ts';
+import { copilotHeadState, runSelectorWith, JOB_LOG_MAX_BYTES, type E2eGateState } from './select.ts';
 import type { CopilotHeadState } from './select.ts';
-import { assertRepo, ghToken, ghGet, ghPost, ghPatch, recordRunClaim, recordRunTerminal, FETCH_TIMEOUT_MS } from './shared.ts';
+import { assertRepo, ghToken, ghGet, ghGetText, ghPost, ghPatch, recordRunClaim, recordRunTerminal, FETCH_TIMEOUT_MS } from './shared.ts';
 
 const L_IN_PROGRESS = 'nightly:in-progress';
 const L_BLOCKED = 'nightly:blocked';
@@ -72,6 +72,10 @@ export interface NextIo {
   /** Generic JSON POST returning the response body (the selector's GraphQL review-thread query).
    *  Optional; absent makes resume candidates fail closed (no resume, still reserved). */
   postJson?(path: string, body: unknown): Promise<{ body: unknown; status: number }>;
+  /** Plain-text GET (the Actions job log the red-CI known-flake guard reads, #980). Optional:
+   *  absent = the guard cannot exonerate a failing job, so every failing job stays a real
+   *  failure (fail toward resuming, #980 review r2). */
+  getText?(path: string): Promise<{ status: number; text: string } | null>;
 }
 
 export interface NextSelection {
@@ -167,6 +171,9 @@ export async function runNext(io: NextIo, env: NodeJS.ProcessEnv, opts: RunNextO
       postJson: io.postJson
         ? async (path, body) => await io.postJson!(path, body)
         : undefined,
+      // The red-CI known-flake guard reads the failed job's log through it (#980 review r5):
+      // absent = the guard cannot exonerate, every failing job stays a real failure.
+      getText: io.getText ? (path) => io.getText!(path) : undefined,
     },
     { ...env, REPO: opts.repo },
     opts.dryRun,
@@ -551,6 +558,10 @@ function realIo(env: NodeJS.ProcessEnv): NextIo {
     postLabel: async (path, body) => await ghPostLabel(path, body, token),
     deleteLabel: async (path) => await ghDelete(path, token),
     patch: async (path, body) => await ghPatch(path, body, token),
+    // The red-CI known-flake guard reads the failed job's log; without it the production entry
+    // point could never exonerate a known flake and a recorded flake would loop the resume rung
+    // forever (#980 review r5).
+    getText: async (path) => await ghGetText(path, token, JOB_LOG_MAX_BYTES),
   };
 }
 
