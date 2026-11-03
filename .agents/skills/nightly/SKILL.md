@@ -300,11 +300,12 @@ order, so an oversized night truncates the LATER sections first):
 - **Waiting on you** (#1092) — open nightly PRs with no review on their CURRENT head, one line
   each (`#<pr> (<issue>) — head <sha7>, CI <green|red|pending>, last owner review
   <state@sha7|none>, last Copilot review <sha7|none>`), then the ready issues held by such a PR
-  (`#<issue> held by #<pr>`). A PR whose last review sits on an OLDER head (the head moved by a
-  merge) is listed too — that is the deadlock state. When the section is non-empty, no PR was
-  opened tonight, and no listed head was touched during the night, the digest's first content
-  line says `Idle night: N nightly PRs await review` (below the version line, which keeps its
-  first position, #1024).
+  (`#<issue> held by #<pr>`, the oldest listed PR when a ready issue has two). A PR whose last
+  review sits on an OLDER head (the head moved by a merge) is listed too — that is the deadlock
+  state. When the section is non-empty, no PR was opened tonight, and no nightly PR head
+  (listed or not) was touched during the night, the digest's first content line says
+  `Idle night: N nightly PRs await review` (below the version line, which keeps its first
+  position, #1024).
 - **Issues filed** tonight (GitHub search, repo-scoped).
 - **Issues commented** tonight.
 - **Runs that ended with unpushed commits** (#1024) — Runs whose `run.unpushed_commits` event

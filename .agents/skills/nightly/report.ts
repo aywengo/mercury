@@ -112,8 +112,9 @@ export interface WaitingOnYou {
    *  ready issue has two listed PRs. */
   held: { issue: number; pr: number }[];
   /** The first-line summary condition: the section is non-empty, no PR was opened tonight, and
-   *  no listed head was touched during the night (every head commit predates local midnight).
-   *  An unreadable head commit counts as touched: unknown never claims "idle". */
+   *  no nightly PR head (LISTED or not) was touched during the night (every head commit
+   *  predates local midnight). An unreadable head commit counts as touched: unknown never
+   *  claims "idle". */
   idle: boolean;
 }
 
@@ -426,7 +427,9 @@ async function headCommitMs(io: ReportIo, repo: string, headSha: string): Promis
  *     the report needs the review decision, not the findings); a PR is listed only when the
  *     review read is COMPLETE and no review of either kind is bound to the current head;
  *   - the required `ci` check at each listed head (green | red | pending);
- *   - each listed head's commit time (the idle test);
+ *   - every open nightly PR head's commit time (the idle test covers listed AND unlisted
+ *     heads: a push during the night to a PR that carries a current-head review, or whose
+ *     review read was incomplete, still makes the night not idle — #1092 acceptance 3).
  *   - the ready issues (current `nightly:ready` label) held by a listed PR.
  */
 export async function collectWaitingOnYou(
@@ -456,9 +459,12 @@ export async function collectWaitingOnYou(
   }
   // 2. Review state at each head (threads off).
   const listed: (WaitingPr & { createdAt: string })[] = [];
+  /** Every open nightly PR head, listed or not: the idle test checks ALL of them. */
+  const allHeads: string[] = [];
   for (const pr of prs) {
     const headSha = pr.head?.sha ?? '';
     if (pr.number === undefined || headSha === '') continue; // no head: nothing to evaluate
+    allHeads.push(headSha);
     const headState = await copilotHeadState(io, repo, pr.number, headSha, 'waiting scan', { threads: false });
     // Listed when the review read is COMPLETE and neither the owner's deciding review nor a
     // Copilot review is bound to the CURRENT head. An incomplete read is not a listing: a
@@ -483,14 +489,15 @@ export async function collectWaitingOnYou(
   }
   for (const w of listed) w.ci = await ciStateAtHead(io, repo, w.headSha);
   listed.sort((a, b) => a.number - b.number);
-  // 3. Idle test: section non-empty, no PR opened tonight, and no listed head touched during
-  // the night. A head commit at/after local midnight is a push that night (a resume push or a
-  // merge from main), so the night was not idle; an unreadable head commit is the same —
-  // "idle" is claimed only when every listed head is verifiably older than the window.
+  // 3. Idle test: section non-empty, no PR opened tonight, and no nightly PR head touched
+  // during the night — LISTED or not. A head commit at/after local midnight is a push that
+  // night (a resume push, a merge from main, or a fix on a PR whose review then landed on the
+  // new head), so the night was not idle; an unreadable head commit is the same — "idle" is
+  // claimed only when every nightly head is verifiably older than the window.
   let idle = listed.length > 0 && opts.prsOpenedTonight === 0;
   if (idle) {
-    for (const w of listed) {
-      const t = await headCommitMs(io, repo, w.headSha);
+    for (const headSha of allHeads) {
+      const t = await headCommitMs(io, repo, headSha);
       if (t === null || t >= win.startMs) { idle = false; break; }
     }
   }

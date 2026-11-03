@@ -39,6 +39,8 @@ function ioWith(opts: {
   checkRuns?: Record<string, { name: string; status: string; conclusion?: string }[]>;
   /** #1092: head commit committer date per sha (the idle test). */
   commitDates?: Record<string, string>;
+  /** #1092: head shas whose check-runs read fails with 500 (the CI degrade path). */
+  badCheckRuns?: string[];
 } = {}): { io: ReportIo; calls: Recorded[] } {
   const calls: Recorded[] = [];
   const io: ReportIo = {
@@ -65,7 +67,10 @@ function ioWith(opts: {
       const rv = path.match(/\/pulls\/(\d+)\/reviews/);
       if (rv) return { body: opts.reviews?.[Number(rv[1])] ?? [], status: 200 };
       const cr = path.match(/\/commits\/([0-9a-f]{40})\/check-runs/);
-      if (cr) return { body: { check_runs: opts.checkRuns?.[cr[1]] ?? [] }, status: 200 };
+      if (cr) {
+        if (opts.badCheckRuns?.includes(cr[1])) return { body: { message: 'boom' }, status: 500 };
+        return { body: { check_runs: opts.checkRuns?.[cr[1]] ?? [] }, status: 200 };
+      }
       const cm = path.match(/\/commits\/([0-9a-f]{40})$/);
       if (cm) {
         const d = opts.commitDates?.[cm[1]];
@@ -1867,7 +1872,9 @@ test('#1092 acceptance 1: only PRs without a review on their CURRENT head are li
       [HEAD_A]: [{ name: 'ci', status: 'completed', conclusion: 'success' }],
       [HEAD_B]: [{ name: 'ci', status: 'completed', conclusion: 'failure' }, { name: 'tests', status: 'completed', conclusion: 'failure' }],
     },
-    commitDates: { [HEAD_A]: BEFORE_NIGHT, [HEAD_B]: BEFORE_NIGHT },
+    // Every open nightly head gets a commit date (the idle test scans listed AND unlisted
+    // heads); the reviewed head is old, so the night stays idle.
+    commitDates: { [HEAD_A]: BEFORE_NIGHT, [HEAD_B]: BEFORE_NIGHT, [HEAD_C]: BEFORE_NIGHT },
     issues: [
       { number: 860, title: 'ready bug', labels: [{ name: 'nightly:ready' }] },
       { number: 1026, title: 'ready bug held by a reviewed PR', labels: [{ name: 'nightly:ready' }] },
@@ -1986,5 +1993,56 @@ test('#1092: an unreadable review read never claims a PR is waiting', async () =
   };
   const out = await runReport(io2, ENV, { repo: REPO, night: '2026-09-26', dryRun: true });
   assert.deepEqual(out.waitingOnYou, { prs: [], held: [], idle: false }, 'unknown state is not a listing');
+});
+test('#1092: a push to an UNLISTED (already-reviewed) head suppresses the idle summary', async () => {
+  // Reviewer round 1: the idle test covers EVERY open nightly PR head, not only the listed
+  // ones — a fix push during the night to a PR that carries a current-head review (or whose
+  // review read was incomplete) still makes the night not idle (acceptance 3, negative half).
+  const { io, calls } = ioWith({
+    prs: [
+      { number: 901, user: NIGHTLY, head: { sha: HEAD_A, ref: 'fix/issue-860-a' }, created_at: '2026-09-20T01:00:00Z' },
+      { number: 905, user: NIGHTLY, head: { sha: HEAD_C, ref: 'fix/issue-980-b' }, created_at: '2026-09-21T01:00:00Z' },
+    ],
+    reviews: {
+      905: [{ user: { login: 'aywengo' }, state: 'APPROVED', commit_id: HEAD_C }], // not listed
+    },
+    checkRuns: { [HEAD_A]: [{ name: 'ci', status: 'completed', conclusion: 'success' }] },
+    commitDates: { [HEAD_A]: BEFORE_NIGHT, [HEAD_C]: IN_NIGHT }, // the reviewed PR's head moved during the night
+  });
+  const out = await runReport(io, ENV, { repo: REPO, night: '2026-09-26', dryRun: false });
+  assert.deepEqual(out.waitingOnYou.prs.map((w) => w.number), [901]);
+  assert.equal(out.waitingOnYou.idle, false, 'a push on an unlisted nightly head is not an idle night');
+  const created = calls.find((c) => c.method === 'POST' && c.path.endsWith('/issues'))!;
+  const body = String((created.body as { body: string }).body);
+  assert.ok(!body.includes('Idle night'));
+});
+
+test('#1092: an unreadable check-runs scan degrades CI to pending, never green', async () => {
+  const { io } = ioWith({
+    prs: [{ number: 901, user: NIGHTLY, head: { sha: HEAD_A, ref: 'fix/issue-860-a' } }],
+    badCheckRuns: [HEAD_A],
+    commitDates: { [HEAD_A]: BEFORE_NIGHT },
+  });
+  const out = await runReport(io, ENV, { repo: REPO, night: '2026-09-26', dryRun: true });
+  assert.equal(out.waitingOnYou.prs[0]!.ci, 'pending', 'no verdict on record is never green');
+  assert.equal(out.waitingOnYou.idle, true, 'the CI read failure does not affect the idle test');
+});
+
+test('#1092: a ready issue with two listed PRs is held by the OLDEST', async () => {
+  const { io } = ioWith({
+    prs: [
+      { number: 960, user: NIGHTLY, head: { sha: HEAD_A, ref: 'fix/issue-860-a' }, created_at: '2026-09-22T01:00:00Z' },
+      { number: 950, user: NIGHTLY, head: { sha: HEAD_B, ref: 'fix/issue-860-b' }, created_at: '2026-09-21T01:00:00Z' },
+    ],
+    issues: [{ number: 860, title: 'ready bug', labels: [{ name: 'nightly:ready' }] }],
+    checkRuns: {
+      [HEAD_A]: [{ name: 'ci', status: 'completed', conclusion: 'success' }],
+      [HEAD_B]: [{ name: 'ci', status: 'completed', conclusion: 'success' }],
+    },
+    commitDates: { [HEAD_A]: BEFORE_NIGHT, [HEAD_B]: BEFORE_NIGHT },
+  });
+  const out = await runReport(io, ENV, { repo: REPO, night: '2026-09-26', dryRun: true });
+  assert.deepEqual(out.waitingOnYou.prs.map((w) => w.number).sort(), [950, 960]);
+  assert.deepEqual(out.waitingOnYou.held, [{ issue: 860, pr: 950 }], 'the older PR (950, created earlier) holds the issue');
 });
 
