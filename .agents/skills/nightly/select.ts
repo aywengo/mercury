@@ -976,7 +976,7 @@ export async function runSelectorWith(
     let prPath: string | null = `/repos/${repo}/pulls?state=open&per_page=30`;
     let prPages = 0;
     let prScanComplete = false;
-    const nightlyPrs: { number: number; head?: { sha?: string | null; ref?: string | null } | null; user?: { login?: string | null } | null; created_at?: string | null; mergeable_state?: string | null }[] = [];
+    const nightlyPrs: { number: number; head?: { sha?: string | null; ref?: string | null } | null; user?: { login?: string | null } | null; created_at?: string | null }[] = [];
     try {
       while (prPath && prPages < 10) {
         const { body, link } = (await io.get(prPath)) as { body: typeof nightlyPrs; link?: string | null };
@@ -1004,7 +1004,7 @@ export async function runSelectorWith(
       // Pass 1 - choose the OLDEST open nightly PR per mapped issue BEFORE any review state is
       // read (#820 r3, blocker 3): otherwise an older PR awaiting a fresh review loses its turn
       // to a newer duplicate that happens to carry findings, and the duplicate gets continued.
-      const chosen = new Map<number, { number: number; head: { sha?: string | null; ref?: string | null } | null; created_at?: string | null; mergeable_state: string | null; supersededBy: number[] }>();
+      const chosen = new Map<number, { number: number; head: { sha?: string | null; ref?: string | null } | null; created_at?: string | null; supersededBy: number[] }>();
       for (const pr of nightlyPrs) {
         const branch = pr.head?.ref ?? '';
         const m = branch.match(/^fix\/(issue)-(\d+)-/);
@@ -1014,7 +1014,7 @@ export async function runSelectorWith(
         if (!issueCandidate) continue;
         const cur = chosen.get(issue);
         if (cur === undefined) {
-          chosen.set(issue, { number: pr.number, head: pr.head ?? null, created_at: pr.created_at ?? '', mergeable_state: pr.mergeable_state ?? null, supersededBy: [] });
+          chosen.set(issue, { number: pr.number, head: pr.head ?? null, created_at: pr.created_at ?? '', supersededBy: [] });
           continue;
         }
         const isNewer = (pr.created_at ?? '') > (cur.created_at ?? '')
@@ -1023,7 +1023,7 @@ export async function runSelectorWith(
           cur.supersededBy.push(pr.number);
         } else {
           cur.supersededBy.push(cur.number);
-          chosen.set(issue, { number: pr.number, head: pr.head ?? null, created_at: pr.created_at ?? '', mergeable_state: pr.mergeable_state ?? null, supersededBy: cur.supersededBy });
+          chosen.set(issue, { number: pr.number, head: pr.head ?? null, created_at: pr.created_at ?? '', supersededBy: cur.supersededBy });
         }
       }
       // Unmapped nightly PRs (#847): a nightly-authored open PR whose branch does NOT name its
@@ -1075,14 +1075,14 @@ export async function runSelectorWith(
                 const pr = unmapped[idx]!;
                 const cur = chosen.get(issue);
                 if (cur === undefined) {
-                  chosen.set(issue, { number: pr.number, head: pr.head ?? null, created_at: pr.created_at ?? '', mergeable_state: pr.mergeable_state ?? null, supersededBy: [] });
+                  chosen.set(issue, { number: pr.number, head: pr.head ?? null, created_at: pr.created_at ?? '', supersededBy: [] });
                 } else {
                   const isNewer = (pr.created_at ?? '') > (cur.created_at ?? '')
                     || ((pr.created_at ?? '') === (cur.created_at ?? '') && pr.number > cur.number);
                   if (isNewer) cur.supersededBy.push(pr.number);
                   else {
                     cur.supersededBy.push(cur.number);
-                    chosen.set(issue, { number: pr.number, head: pr.head ?? null, created_at: pr.created_at ?? '', mergeable_state: pr.mergeable_state ?? null, supersededBy: cur.supersededBy });
+                    chosen.set(issue, { number: pr.number, head: pr.head ?? null, created_at: pr.created_at ?? '', supersededBy: cur.supersededBy });
                   }
                 }
               }
@@ -1125,17 +1125,30 @@ export async function runSelectorWith(
           resume.push({ issue, prNumber: pr.number, headSha, state: 'owner-changes', createdAt: pr.created_at ?? '' });
           continue;
         }
-        // Conflicted with main on the CURRENT head (#1015): the PR list reports
-        // `mergeable_state: dirty` — GitHub computed the mergeability and the head conflicts
-        // with the base branch. Such a PR can never merge as-is, so it is resume work whether
-        // or not a review or CI speaks up. `unknown` is "not computed yet", not "conflicted"
-        // (the next night re-reads it), and `clean` is mergeable: neither is a signal.
-        // mergeable_state is PR-list metadata, not review evidence (#980 review r5): the check
-        // runs even when the review scan is incomplete. It outranks red ci for the same PR:
-        // resolving the conflict merges main and re-runs CI on a head that can actually merge.
-        if (pr.mergeable_state === 'dirty') {
-          resume.push({ issue, prNumber: pr.number, headSha, state: 'conflicted', createdAt: pr.created_at ?? '' });
-          continue;
+        // Conflicted with main on the CURRENT head (#1015): GitHub's PR LIST response omits
+        // mergeable/mergeable_state (measured 2026-11-03, #1099 review r1) — the DETAIL
+        // endpoint computes and reports them. `dirty` means GitHub computed the mergeability
+        // and the head conflicts with the base branch: such a PR can never merge as-is, so it
+        // is resume work whether or not a review or CI speaks up. `unknown` is "not computed
+        // yet", not "conflicted" (the next night re-reads it), and `clean` is mergeable:
+        // neither is a signal. The detail read is not review evidence (#980 review r5): it
+        // runs even when the review scan is incomplete, and it outranks red ci for the same
+        // PR: resolving the conflict merges main and re-runs CI on a head that can actually
+        // merge. An unreadable detail response fails the signal closed for THIS PR (the
+        // issue stays reserved, the other signals still apply) — the same discipline as a
+        // capped check-runs scan.
+        {
+          let dirty = false;
+          try {
+            const { body } = (await io.get(`/repos/${repo}/pulls/${pr.number}`)) as { body: { mergeable_state?: string | null } | null; link?: string | null };
+            dirty = body !== null && typeof body === 'object' && body.mergeable_state === 'dirty';
+          } catch (e) {
+            console.error(`resume scan: PR #${pr.number} detail failed: ${String(e instanceof Error ? e.message : e)}`);
+          }
+          if (dirty) {
+            resume.push({ issue, prNumber: pr.number, headSha, state: 'conflicted', createdAt: pr.created_at ?? '' });
+            continue;
+          }
         }
         // Red CI on the CURRENT head (#980): the required aggregate check completed with
         // conclusion failure. Check runs are GitHub metadata (names, statuses, conclusions and

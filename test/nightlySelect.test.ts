@@ -2171,10 +2171,14 @@ test('#1010: the selector carries the gate state into its answer', async () => {
 // Fixture shaped like the 2026-10-19 conflicted set: nightly PRs whose head's mergeable_state
 // is the signal under test; no reviews, no Copilot threads, CI green unless redCi is set.
 function conflictIo(opts: {
-  /** The first PR's mergeable_state (default 'dirty'). */
+  /** The detail endpoint's mergeable_state for the first PR (default 'dirty'). The PR LIST
+   *  response omits mergeable/mergeable_state entirely (measured 2026-11-03, #1099 r1) — the
+   *  signal comes from the detail endpoint only. */
   mergeableState?: string;
   /** The first PR's author (default the nightly identity). */
   prUser?: string;
+  /** The detail endpoint fetch throws: the conflict signal must fail closed. */
+  detailError?: boolean;
   /** Capped thread query: the review scan is INCOMPLETE (#980 review r5 discipline). */
   threadsIncomplete?: boolean;
   /** Red ci on the head (the compound case: dirty AND red). */
@@ -2184,11 +2188,11 @@ function conflictIo(opts: {
 }) {
   const trusted = issue({ number: 965, user: { login: 'aywengo' } });
   const prs = [
-    { number: 1965, user: { login: opts.prUser ?? 'mercury-nightly' }, created_at: '2026-10-15T22:35:00Z', head: { sha: 'sha965', ref: 'fix/issue-965-typecheck' }, mergeable_state: opts.mergeableState ?? 'dirty' },
+    { number: 1965, user: { login: opts.prUser ?? 'mercury-nightly' }, created_at: '2026-10-15T22:35:00Z', head: { sha: 'sha965', ref: 'fix/issue-965-typecheck' } },
   ];
   const issues = [trusted];
   if (opts.ownerReviewOnSecond) {
-    prs.push({ number: 1966, user: { login: 'mercury-nightly' }, created_at: '2026-10-16T20:00:00Z', head: { sha: 'sha966', ref: 'fix/issue-966-other' }, mergeable_state: 'clean' });
+    prs.push({ number: 1966, user: { login: 'mercury-nightly' }, created_at: '2026-10-16T20:00:00Z', head: { sha: 'sha966', ref: 'fix/issue-966-other' } });
     issues.push(issue({ number: 966, user: { login: 'aywengo' } }));
   }
   const checkRuns = opts.redCi
@@ -2205,6 +2209,11 @@ function conflictIo(opts: {
       }
       if (path.includes('/pulls/1965/reviews')) return { body: [], link: null };
       if (path.includes('/check-runs?')) return { body: { check_runs: checkRuns }, link: null };
+      const detail = path.match(/^\/repos\/aywengo\/mercury\/pulls\/(\d+)$/);
+      if (detail) {
+        if (opts.detailError) throw new Error('detail fetch failed');
+        return { body: { mergeable_state: detail[1] === '1965' ? (opts.mergeableState ?? 'dirty') : 'clean' }, link: null };
+      }
       return { body: issues, link: null };
     },
     async post() { return true; },
@@ -2292,4 +2301,11 @@ test('#1015: a conflicted head that is also red reports the conflict (merging ma
   assert.equal(s.issue, 965);
   assert.match(s.reason, /conflicted with main on head sha965/);
   assert.doesNotMatch(s.reason, /red ci/);
+});
+
+test('#1015: an unreadable PR detail fails the conflict signal closed (no resume, issue stays reserved)', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const s = await runSelectorWith(conflictIo({ detailError: true }) as never, { REPO: 'aywengo/mercury' }, true);
+  assert.notEqual(s.rung, 0, 'an unreadable detail response cannot establish a conflict');
+  assert.notEqual(s.issue, 965, 'the open PR still reserves the issue from new work');
 });
