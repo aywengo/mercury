@@ -2162,3 +2162,130 @@ test('#1010: the selector carries the gate state into its answer', async () => {
   const sel = await runSelectorWith(io, { REPO: 'aywengo/mercury' }, true);
   assert.equal(sel.e2eGate, 'absent', 'a host without the two variables must say so in the answer');
 });
+
+
+// -- Conflicted head (rung 0, #1015): a nightly PR whose head is `mergeable_state: dirty`
+// conflicts with main and can never merge as-is. It is resume work with no review and no CI
+// verdict needed; `unknown` (not computed yet) and `clean` are not signals.
+
+// Fixture shaped like the 2026-10-19 conflicted set: nightly PRs whose head's mergeable_state
+// is the signal under test; no reviews, no Copilot threads, CI green unless redCi is set.
+function conflictIo(opts: {
+  /** The first PR's mergeable_state (default 'dirty'). */
+  mergeableState?: string;
+  /** The first PR's author (default the nightly identity). */
+  prUser?: string;
+  /** Capped thread query: the review scan is INCOMPLETE (#980 review r5 discipline). */
+  threadsIncomplete?: boolean;
+  /** Red ci on the head (the compound case: dirty AND red). */
+  redCi?: boolean;
+  /** A second, newer nightly PR carrying the owner's changes-requested review (acceptance 5). */
+  ownerReviewOnSecond?: boolean;
+}) {
+  const trusted = issue({ number: 965, user: { login: 'aywengo' } });
+  const prs = [
+    { number: 1965, user: { login: opts.prUser ?? 'mercury-nightly' }, created_at: '2026-10-15T22:35:00Z', head: { sha: 'sha965', ref: 'fix/issue-965-typecheck' }, mergeable_state: opts.mergeableState ?? 'dirty' },
+  ];
+  const issues = [trusted];
+  if (opts.ownerReviewOnSecond) {
+    prs.push({ number: 1966, user: { login: 'mercury-nightly' }, created_at: '2026-10-16T20:00:00Z', head: { sha: 'sha966', ref: 'fix/issue-966-other' }, mergeable_state: 'clean' });
+    issues.push(issue({ number: 966, user: { login: 'aywengo' } }));
+  }
+  const checkRuns = opts.redCi
+    ? [
+      { name: 'ci', status: 'completed', conclusion: 'failure' },
+      { name: 'test (node 22.18.0)', status: 'completed', conclusion: 'failure' },
+    ]
+    : [{ name: 'ci', status: 'completed', conclusion: 'success' }];
+  return {
+    async get(path: string) {
+      if (path.includes('/pulls?')) return { body: prs, link: null };
+      if (path.includes('/pulls/1966/reviews')) {
+        return { body: opts.ownerReviewOnSecond ? [{ user: { login: 'aywengo' }, state: 'CHANGES_REQUESTED', commit_id: 'sha966' }] : [], link: null };
+      }
+      if (path.includes('/pulls/1965/reviews')) return { body: [], link: null };
+      if (path.includes('/check-runs?')) return { body: { check_runs: checkRuns }, link: null };
+      return { body: issues, link: null };
+    },
+    async post() { return true; },
+    async postJson() {
+      if (opts.threadsIncomplete) {
+        return { status: 200, body: { data: { repository: { pullRequest: { reviewThreads: { totalCount: 101, pageInfo: { hasNextPage: true }, nodes: [] } } } } } };
+      }
+      return { status: 200, body: { data: { repository: { pullRequest: { reviewThreads: { totalCount: 0, pageInfo: { hasNextPage: false }, nodes: [] } } } } } };
+    },
+  };
+}
+
+test('#1015: a nightly PR with a conflicted (dirty) head resumes at rung 0, reason names the head sha', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const s = await runSelectorWith(conflictIo({}) as never, { REPO: 'aywengo/mercury' }, true);
+  assert.equal(s.rung, 0, 'a conflicted head is resume work with no review and no CI verdict');
+  assert.equal(s.issue, 965);
+  assert.match(s.reason, /conflicted with main on head sha965/);
+});
+
+test('#1015: an unknown mergeable_state is not a signal (GitHub has not computed it yet)', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const s = await runSelectorWith(conflictIo({ mergeableState: 'unknown' }) as never, { REPO: 'aywengo/mercury' }, true);
+  assert.notEqual(s.rung, 0, 'unknown means "not computed yet", not "conflicted"; the next night re-reads it');
+});
+
+test('#1015: a clean mergeable_state is not a signal', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const s = await runSelectorWith(conflictIo({ mergeableState: 'clean' }) as never, { REPO: 'aywengo/mercury' }, true);
+  assert.notEqual(s.rung, 0, 'a clean head can merge; it is not resume work');
+});
+
+test('#1015: a PR authored by someone else with a dirty head is not selected', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const s = await runSelectorWith(conflictIo({ prUser: 'someone-else' }) as never, { REPO: 'aywengo/mercury' }, true);
+  assert.notEqual(s.rung, 0, 'the resume rung takes nightly-authored PRs only');
+});
+
+test('#1015: an owner change request on another PR outranks a dirty head', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const s = await runSelectorWith(conflictIo({ ownerReviewOnSecond: true }) as never, { REPO: 'aywengo/mercury' }, true);
+  assert.equal(s.rung, 0);
+  assert.equal(s.issue, 966, 'the owner review gates the merge and resumes first');
+  assert.match(s.reason, /changes-requested/);
+});
+
+test('#1015: ladder ordering puts owner changes first, then conflicted and red ci (same tier, oldest first), then findings', () => {
+  const c = [
+    cand(issue({ number: 10, labels: [{ name: 'nightly:ready' }] }), [labeled('aywengo', 'nightly:ready')]),
+    cand(issue({ number: 11, labels: [{ name: 'nightly:ready' }] }), [labeled('aywengo', 'nightly:ready')]),
+    cand(issue({ number: 12, labels: [{ name: 'nightly:ready' }] }), [labeled('aywengo', 'nightly:ready')]),
+    cand(issue({ number: 13, labels: [{ name: 'nightly:ready' }] }), [labeled('aywengo', 'nightly:ready')]),
+  ];
+  const resume = [
+    { issue: 10, prNumber: 100, headSha: 'a', state: 'findings' as const, createdAt: '2026-10-01T00:00:00Z' },
+    { issue: 12, prNumber: 102, headSha: 'c', state: 'red-ci' as const, createdAt: '2026-10-06T00:00:00Z', failingJobs: 'test (node 24.x)' },
+    { issue: 11, prNumber: 101, headSha: 'b', state: 'conflicted' as const, createdAt: '2026-10-03T00:00:00Z' },
+    { issue: 13, prNumber: 103, headSha: 'd', state: 'owner-changes' as const, createdAt: '2026-10-07T00:00:00Z' },
+  ];
+  const s = selectLadder(c, { ...TERMINAL, resume });
+  assert.equal(s.rung, 0);
+  assert.equal(s.issue, 13, 'owner change request first');
+  const s2 = selectLadder(c, { ...TERMINAL, resume: resume.filter((r) => r.issue !== 13) });
+  assert.equal(s2.issue, 11, 'the older conflicted head wins the shared tier with the red-ci PR');
+  assert.match(s2.reason, /conflicted with main on head b/);
+  const s3 = selectLadder(c, { ...TERMINAL, resume: resume.filter((r) => r.issue === 12 || r.issue === 10) });
+  assert.equal(s3.issue, 12, 'red ci outranks older Copilot findings');
+});
+
+test('#1015: a conflicted head resumes even when the review scan is incomplete (the conflict is not review evidence)', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const s = await runSelectorWith(conflictIo({ threadsIncomplete: true }) as never, { REPO: 'aywengo/mercury' }, true);
+  assert.equal(s.rung, 0, 'mergeable_state is PR-list metadata; an unreadable thread query does not hide a conflict');
+  assert.equal(s.issue, 965);
+});
+
+test('#1015: a conflicted head that is also red reports the conflict (merging main resolves both)', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const s = await runSelectorWith(conflictIo({ redCi: true }) as never, { REPO: 'aywengo/mercury' }, true);
+  assert.equal(s.rung, 0);
+  assert.equal(s.issue, 965);
+  assert.match(s.reason, /conflicted with main on head sha965/);
+  assert.doesNotMatch(s.reason, /red ci/);
+});
