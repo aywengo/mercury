@@ -2229,18 +2229,22 @@ test('#1015: an unknown mergeable_state is not a signal (GitHub has not computed
   const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
   const s = await runSelectorWith(conflictIo({ mergeableState: 'unknown' }) as never, { REPO: 'aywengo/mercury' }, true);
   assert.notEqual(s.rung, 0, 'unknown means "not computed yet", not "conflicted"; the next night re-reads it');
+  assert.notEqual(s.issue, 965, 'the open PR reserves the issue from new work too');
 });
 
 test('#1015: a clean mergeable_state is not a signal', async () => {
   const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
   const s = await runSelectorWith(conflictIo({ mergeableState: 'clean' }) as never, { REPO: 'aywengo/mercury' }, true);
   assert.notEqual(s.rung, 0, 'a clean head can merge; it is not resume work');
+  assert.notEqual(s.issue, 965, 'the open PR reserves the issue from new work too');
 });
 
 test('#1015: a PR authored by someone else with a dirty head is not selected', async () => {
   const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
   const s = await runSelectorWith(conflictIo({ prUser: 'someone-else' }) as never, { REPO: 'aywengo/mercury' }, true);
   assert.notEqual(s.rung, 0, 'the resume rung takes nightly-authored PRs only');
+  assert.equal(s.rung, 3, 'a foreign dirty PR reserves nothing — the issue stays selectable as new work');
+  assert.equal(s.issue, 965);
 });
 
 test('#1015: an owner change request on another PR outranks a dirty head', async () => {

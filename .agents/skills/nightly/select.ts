@@ -1115,10 +1115,13 @@ export async function runSelectorWith(
         // pushed after the review moves the head, so an answered review waits for re-review
         // instead of being resumed again. Owner precedence applies only when the review evidence
         // is COMPLETE — an incomplete scan cannot decide whose review is the latest (#980
-        // review r5). Excluded issues never resume.
+        // review r5).
+        // Excluded issues (nightly:blocked after hand-off, proposed) never resume (#820 r1,
+        // blocker 1): the review cannot re-open work a human must answer. One guard covers
+        // every signal below (owner, conflict, red ci, findings).
+        if (isExcluded(issueCandidate.issue)) continue;
         const lastOwner = headState.lastOwner;
-        if (headState.complete && lastOwner !== null && lastOwner.state === 'CHANGES_REQUESTED' && lastOwner.commit_id === headSha
-          && !isExcluded(issueCandidate.issue)) {
+        if (headState.complete && lastOwner !== null && lastOwner.state === 'CHANGES_REQUESTED' && lastOwner.commit_id === headSha) {
           resume.push({ issue, prNumber: pr.number, headSha, state: 'owner-changes', createdAt: pr.created_at ?? '' });
           continue;
         }
@@ -1130,7 +1133,7 @@ export async function runSelectorWith(
         // mergeable_state is PR-list metadata, not review evidence (#980 review r5): the check
         // runs even when the review scan is incomplete. It outranks red ci for the same PR:
         // resolving the conflict merges main and re-runs CI on a head that can actually merge.
-        if (pr.mergeable_state === 'dirty' && !isExcluded(issueCandidate.issue)) {
+        if (pr.mergeable_state === 'dirty') {
           resume.push({ issue, prNumber: pr.number, headSha, state: 'conflicted', createdAt: pr.created_at ?? '' });
           continue;
         }
@@ -1210,9 +1213,6 @@ export async function runSelectorWith(
         if (!hasHeadReview || lastCopilot === null) continue; // relay fetches the review first
         if (lastCopilot.state === 'APPROVED') continue; // awaiting merge; not resume work
         if (headState.findings.length === 0) continue; // approval-class or fully addressed: awaits merge
-        // Excluded issues (nightly:blocked after hand-off, proposed) never resume (#820 r1,
-        // blocker 1): the review cannot re-open work a human must answer.
-        if (isExcluded(issueCandidate.issue)) continue;
         resume.push({ issue, prNumber: pr.number, headSha, state: 'findings', createdAt: pr.created_at ?? '' });
         if (pr.supersededBy.length > 0) {
           console.error(`resume scan: PR #${pr.number} continues for issue #${issue}; newer duplicate(s) superseded: ${pr.supersededBy.map((n) => '#' + n).join(', ')}`);
