@@ -31,6 +31,14 @@ function ioWith(opts: {
   timedOutRuns?: { id: string; task: string; status: string; constraints?: { notAfter?: string } }[];
   notAfterRunIds?: string[];
   mercury?: boolean;
+  /** #1092: open PRs (the "Waiting on you" scan filters by the nightly identity itself). */
+  prs?: { number: number; user: { login: string }; head: { sha: string; ref?: string }; created_at?: string }[];
+  /** #1092: REST reviews per PR number, oldest-first. */
+  reviews?: Record<number, { user: { login: string }; state: string; commit_id?: string }[]>;
+  /** #1092: check runs per head sha. */
+  checkRuns?: Record<string, { name: string; status: string; conclusion?: string }[]>;
+  /** #1092: head commit committer date per sha (the idle test). */
+  commitDates?: Record<string, string>;
 } = {}): { io: ReportIo; calls: Recorded[] } {
   const calls: Recorded[] = [];
   const io: ReportIo = {
@@ -49,6 +57,24 @@ function ioWith(opts: {
       if (path.includes('/issues?labels=nightly%3Areport')) {
         // Yesterday's open report:
         return { body: opts.issues?.filter((i) => i.labels?.some((l) => l.name === 'nightly:report')) ?? [], status: 200 };
+      }
+      // #1092: the "Waiting on you" reads.
+      if (path.startsWith(`/repos/${REPO}/pulls?state=open`)) {
+        return { body: opts.prs ?? [], status: 200 };
+      }
+      const rv = path.match(/\/pulls\/(\d+)\/reviews/);
+      if (rv) return { body: opts.reviews?.[Number(rv[1])] ?? [], status: 200 };
+      const cr = path.match(/\/commits\/([0-9a-f]{40})\/check-runs/);
+      if (cr) return { body: { check_runs: opts.checkRuns?.[cr[1]] ?? [] }, status: 200 };
+      const cm = path.match(/\/commits\/([0-9a-f]{40})$/);
+      if (cm) {
+        const d = opts.commitDates?.[cm[1]];
+        return d
+          ? { body: { commit: { committer: { date: d }, author: { date: d } } }, status: 200 }
+          : { body: null, status: 404 };
+      }
+      if (path.includes('/issues?labels=nightly%3Aready')) {
+        return { body: (opts.issues ?? []).filter((i) => i.labels?.some((l) => l.name === 'nightly:ready')), status: 200 };
       }
       const c = path.match(/\/issues\/(\d+)\/comments/);
       if (c) return { body: opts.comments?.[Number(c[1])] ?? [], status: 200 };
@@ -1809,3 +1835,156 @@ test('#1042: a failed runs listing degrades to an empty section, like the stoppe
   assert.deepEqual(await collectFailedRuns(io.mercury!, '2026-09-26'), []);
   assert.equal(calls, 1, 'one attempt, no crash');
 });
+
+// ---- #1092: the "Waiting on you" section ----
+// The queue can deadlock on reviews: every ready issue held by an open nightly PR nobody has
+// reviewed on its CURRENT head. These fixtures use 40-char heads so the sha7 display in the
+// digest lines is unambiguous.
+const HEAD_A = 'a'.repeat(40); // listed PR head
+const HEAD_B = 'b'.repeat(40); // listed PR head
+const HEAD_C = 'c'.repeat(40); // head carrying an owner review (not listed)
+const HEAD_D = 'd'.repeat(40); // an OLDER head (the reviews live here)
+const HEAD_E = 'e'.repeat(40); // the moved current head (acceptance 4)
+
+const WIN26 = nightWindow('2026-09-26');
+const BEFORE_NIGHT = new Date(WIN26.startMs - 24 * 3600_000).toISOString();
+const IN_NIGHT = new Date(WIN26.startMs + 30 * 60_000).toISOString();
+const NIGHTLY = { login: 'mercury-nightly' };
+
+test('#1092 acceptance 1: only PRs without a review on their CURRENT head are listed', async () => {
+  const { io, calls } = ioWith({
+    prs: [
+      { number: 901, user: NIGHTLY, head: { sha: HEAD_A, ref: 'fix/issue-860-a' }, created_at: '2026-09-20T01:00:00Z' },
+      { number: 902, user: NIGHTLY, head: { sha: HEAD_B, ref: 'fix/issue-980-b' }, created_at: '2026-09-21T01:00:00Z' },
+      { number: 903, user: NIGHTLY, head: { sha: HEAD_C, ref: 'fix/issue-1026-c' }, created_at: '2026-09-22T01:00:00Z' },
+      { number: 904, user: { login: 'someone-else' }, head: { sha: HEAD_A, ref: 'feature/x' } },
+    ],
+    reviews: {
+      // #903's head carries an owner review: it is not waiting on anyone.
+      903: [{ user: { login: 'aywengo' }, state: 'APPROVED', commit_id: HEAD_C }],
+    },
+    checkRuns: {
+      [HEAD_A]: [{ name: 'ci', status: 'completed', conclusion: 'success' }],
+      [HEAD_B]: [{ name: 'ci', status: 'completed', conclusion: 'failure' }, { name: 'tests', status: 'completed', conclusion: 'failure' }],
+    },
+    commitDates: { [HEAD_A]: BEFORE_NIGHT, [HEAD_B]: BEFORE_NIGHT },
+    issues: [
+      { number: 860, title: 'ready bug', labels: [{ name: 'nightly:ready' }] },
+      { number: 1026, title: 'ready bug held by a reviewed PR', labels: [{ name: 'nightly:ready' }] },
+    ],
+  });
+  const out = await runReport(io, ENV, { repo: REPO, night: '2026-09-26', dryRun: false });
+  assert.deepEqual(out.waitingOnYou.prs.map((w) => w.number), [901, 902], 'exactly the two unreviewed PRs');
+  const [w901, w902] = out.waitingOnYou.prs;
+  assert.equal(w901!.issue, 860, 'the issue comes from the fix/issue-<N>-* branch');
+  assert.equal(w901!.ci, 'green');
+  assert.equal(w901!.ownerReview, undefined);
+  assert.equal(w901!.copilotReview, undefined);
+  assert.equal(w902!.ci, 'red', 'a completed failing ci aggregate is red');
+  // acceptance 2: the ready issue held by a LISTED PR appears; the one held by the reviewed
+  // PR does not (its PR is not waiting).
+  assert.deepEqual(out.waitingOnYou.held, [{ issue: 860, pr: 901 }]);
+  // idle: section non-empty, no PR opened tonight, every listed head predates the night.
+  assert.equal(out.waitingOnYou.idle, true);
+  const created = calls.find((c) => c.method === 'POST' && c.path.endsWith('/issues'))!;
+  const body = String((created.body as { body: string }).body);
+  const lines = body.split('\n');
+  assert.equal(lines[2], '_Idle night: 2 nightly PRs await review._', 'the summary is the first content line');
+  assert.match(body, /## Waiting on you \(nightly PRs with no review on their current head\)/);
+  assert.match(body, /- #901 \(#860\) — head `aaaaaaa`, CI green, last owner review none, last Copilot review none/);
+  assert.match(body, /- #902 \(#980\) — head `bbbbbbb`, CI red, last owner review none, last Copilot review none/);
+  assert.match(body, /- #860 held by #901/);
+  assert.ok(!body.includes('#903'), 'the reviewed PR is not listed');
+  // check-runs are read for listed heads only (the reviewed head costs nothing).
+  const crCalls = calls.filter((c) => c.method === 'GET' && c.path.includes('/check-runs'));
+  assert.equal(crCalls.length, 2);
+  assert.ok(!crCalls.some((c) => c.path.includes(HEAD_C)));
+});
+
+test('#1092 acceptance 4: a review on an OLDER head does not cover the current head', async () => {
+  // The head moved (a merge from main) after both reviews: the PR is waiting on a fresh
+  // review and must be listed, showing where the old reviews sit. This is the regression
+  // test for the issue — on base the section does not exist at all.
+  const { io, calls } = ioWith({
+    prs: [
+      { number: 910, user: NIGHTLY, head: { sha: HEAD_E, ref: 'fix/issue-860-a' }, created_at: '2026-09-20T01:00:00Z' },
+    ],
+    reviews: {
+      910: [
+        { user: { login: 'aywengo' }, state: 'CHANGES_REQUESTED', commit_id: HEAD_D },
+        { user: { login: 'copilot-pull-request-reviewer[bot]' }, state: 'COMMENTED', commit_id: HEAD_D },
+      ],
+    },
+    checkRuns: { [HEAD_E]: [{ name: 'ci', status: 'completed', conclusion: 'success' }] },
+    commitDates: { [HEAD_E]: IN_NIGHT }, // the merge landed during the night: not idle
+    issues: [{ number: 860, title: 'ready bug', labels: [{ name: 'nightly:ready' }] }],
+  });
+  const out = await runReport(io, ENV, { repo: REPO, night: '2026-09-26', dryRun: false });
+  assert.equal(out.waitingOnYou.prs.length, 1, 'the moved head is listed');
+  const w = out.waitingOnYou.prs[0]!;
+  assert.equal(w.headSha, HEAD_E);
+  assert.equal(w.ownerReview, `changes_requested@${HEAD_D.slice(0, 7)}`, 'the old owner review is shown, bound to its head');
+  assert.equal(w.copilotReview, HEAD_D.slice(0, 7));
+  assert.equal(out.waitingOnYou.idle, false, 'a push (the merge) during the night is not an idle night');
+  const created = calls.find((c) => c.method === 'POST' && c.path.endsWith('/issues'))!;
+  const body = String((created.body as { body: string }).body);
+  assert.ok(!body.includes('Idle night'), 'no first-line summary on a night with a pushed fix');
+  assert.match(body, /- #910 \(#860\) — head `eeeeeee`, CI green, last owner review changes_requested@ddddddd, last Copilot review ddddddd/);
+  assert.match(body, /- #860 held by #910/);
+});
+
+test('#1092 acceptance 3: a PR opened tonight suppresses the idle summary', async () => {
+  const { io } = ioWith({
+    searchItems: { 'is:pr created': [{ number: 950, title: 'tonight', html_url: 'u' }] },
+    prs: [{ number: 901, user: NIGHTLY, head: { sha: HEAD_A, ref: 'fix/issue-860-a' } }],
+    checkRuns: { [HEAD_A]: [{ name: 'ci', status: 'in_progress' }] },
+    commitDates: { [HEAD_A]: BEFORE_NIGHT },
+  });
+  const out = await runReport(io, ENV, { repo: REPO, night: '2026-09-26', dryRun: true });
+  assert.equal(out.waitingOnYou.prs.length, 1);
+  assert.equal(out.waitingOnYou.prs[0]!.ci, 'pending', 'an in-progress ci check is pending');
+  assert.equal(out.waitingOnYou.idle, false, 'a night that opened a PR was not idle');
+});
+
+test('#1092: a Copilot review on the current head is a review, not a waiting PR', async () => {
+  const { io, calls } = ioWith({
+    prs: [{ number: 920, user: NIGHTLY, head: { sha: HEAD_A, ref: 'fix/issue-860-a' } }],
+    reviews: { 920: [{ user: { login: 'copilot-pull-request-reviewer[bot]' }, state: 'APPROVED', commit_id: HEAD_A }] },
+  });
+  const out = await runReport(io, ENV, { repo: REPO, night: '2026-09-26', dryRun: false });
+  assert.deepEqual(out.waitingOnYou, { prs: [], held: [], idle: false });
+  const created = calls.find((c) => c.method === 'POST' && c.path.endsWith('/issues'))!;
+  const body = String((created.body as { body: string }).body);
+  assert.match(body, /## Waiting on you \(nightly PRs with no review on their current head\)\n_none_/);
+});
+
+test('#1092: a nightly PR whose branch does not name its issue is listed without one', async () => {
+  const { io, calls } = ioWith({
+    prs: [{ number: 930, user: NIGHTLY, head: { sha: HEAD_A, ref: 'deviated-branch' } }],
+    checkRuns: { [HEAD_A]: [{ name: 'ci', status: 'completed', conclusion: 'success' }] },
+    commitDates: { [HEAD_A]: BEFORE_NIGHT },
+  });
+  const out = await runReport(io, ENV, { repo: REPO, night: '2026-09-26', dryRun: false });
+  assert.equal(out.waitingOnYou.prs.length, 1, 'the waiting line still appears (visibility first)');
+  assert.equal(out.waitingOnYou.prs[0]!.issue, undefined, 'the issue group is omitted, not guessed');
+  assert.equal(out.waitingOnYou.idle, true);
+  const created = calls.find((c) => c.method === 'POST' && c.path.endsWith('/issues'))!;
+  const body = String((created.body as { body: string }).body);
+  assert.match(body, /- #930 — head `aaaaaaa`, CI green, last owner review none, last Copilot review none/);
+});
+
+test('#1092: an unreadable review read never claims a PR is waiting', async () => {
+  const { io } = ioWith({
+    prs: [{ number: 940, user: NIGHTLY, head: { sha: HEAD_A, ref: 'fix/issue-860-a' } }],
+  });
+  const io2: ReportIo = {
+    ...io,
+    async get(path) {
+      if (path.includes('/reviews')) return { body: { error: 'boom' }, status: 200 }; // 2xx non-array
+      return io.get(path);
+    },
+  };
+  const out = await runReport(io2, ENV, { repo: REPO, night: '2026-09-26', dryRun: true });
+  assert.deepEqual(out.waitingOnYou, { prs: [], held: [], idle: false }, 'unknown state is not a listing');
+});
+

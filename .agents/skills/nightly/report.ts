@@ -4,6 +4,9 @@
  * One GitHub issue per night, labeled `nightly:report`, closed by the next night's report:
  *
  *   - PRs opened tonight and issues filed tonight (GitHub search, repo-scoped, bounded).
+ *   - Waiting on you (#1092): open nightly PRs with no review on their CURRENT head, the
+ *     ready issues they hold, and the first-line "Idle night" summary when the night was idle
+ *     because of them.
  *   - Issues commented on tonight (candidates from the supported `updated:<range>` search,
  *     filtered by per-issue comment timestamps - GitHub search has no `commented:<range>`).
  *   - Claims released tonight (#1001): issues whose `nightly:in-progress` claim the selector
@@ -18,7 +21,7 @@
  *   - Flakes: the nightly-e2e flake clock (same state file) — recent fingerprint nights.
  *
  * Output: exactly one JSON line
- * `{ night, issue, closedPrevious, prs, issuesFiled, issuesCommented, claimsReleased, blocked, runsStopped, runsFailed, flakes }`.
+ * `{ night, issue, closedPrevious, prs, issuesFiled, issuesCommented, claimsReleased, blocked, waitingOnYou, runsStopped, runsFailed, flakes }`.
  * No dependencies; all I/O injectable. Writes: the digest issue itself and the close of
  * every OPEN digest titled `nightly report — D` with D strictly BEFORE the report night - one
  * rule that self-heals failed closes on any later night and can never erase a newer report.
@@ -32,9 +35,13 @@ import { basename } from 'node:path';
 import { redactText } from './e2e.ts';
 import { loadFlakeState, normalizeTestName } from './e2e.ts';
 import { assertRepo, CLAIM_RELEASED_MARKER, localDateString, nextDay, prevDay, ghGet, ghPost, ghPatch, ghToken, loadRunLedger, FETCH_TIMEOUT_MS } from './shared.ts';
+import { copilotHeadState, NIGHTLY_IDENTITY, RED_CI_CHECK, type CheckRunShim } from './select.ts';
 
 const L_REPORT = 'nightly:report';
 const L_BLOCKED = 'nightly:blocked';
+/** #1092: the "held by" listing reads the CURRENT label (display, not the selector's
+ * timeline-trusted ready) — same name as select.ts's L_READY. */
+const L_READY = 'nightly:ready';
 const SEARCH_PER_PAGE = 100;
 const SEARCH_CAP = 10; // pages of 100 = 1000 hits, bounded
 
@@ -77,6 +84,39 @@ export interface SkillVersionRecord {
   stale: boolean;
 }
 
+/** One line of the "Waiting on you" section (#1092): an open nightly PR whose CURRENT head
+ * carries no owner or Copilot review — the queue deadlocks on exactly these. */
+export interface WaitingPr {
+  number: number;
+  /** The issue the PR maps to (its `fix/issue-<N>-*` branch names it), when the branch does. */
+  issue?: number;
+  headSha: string;
+  /** The required `ci` check at the head: completed `success` = green, any other COMPLETED
+   *  conclusion = red, absent or still running = pending. An unreadable check-runs read
+   *  degrades to pending too: no verdict on record, never green. */
+  ci: 'green' | 'red' | 'pending';
+  /** The owner's latest deciding review as `state@sha7` (approved | changes_requested |
+   *  dismissed), or undefined when the PR has none. A review on an OLDER head is shown as
+   *  such — the reader sees the head moved out from under it. */
+  ownerReview?: string;
+  /** The last Copilot review's head as sha7, or undefined when the PR has none. */
+  copilotReview?: string;
+}
+
+/** The "Waiting on you" section's data (#1092), read from GitHub at report time, never memory. */
+export interface WaitingOnYou {
+  /** Listed PRs: the review read was complete and NO owner or Copilot review is bound to the
+   *  current head (a review on an older head does not count — that is the deadlock state). */
+  prs: WaitingPr[];
+  /** Ready issues held by a listed PR (`#<issue> held by #<pr>`); the OLDEST listed PR when a
+   *  ready issue has two listed PRs. */
+  held: { issue: number; pr: number }[];
+  /** The first-line summary condition: the section is non-empty, no PR was opened tonight, and
+   *  no listed head was touched during the night (every head commit predates local midnight).
+   *  An unreadable head commit counts as touched: unknown never claims "idle". */
+  idle: boolean;
+}
+
 export interface ReportData {
   prs: { number?: number; title: string; url?: string }[];
   issuesFiled: { number?: number; title: string; url?: string; author?: string }[];
@@ -85,6 +125,9 @@ export interface ReportData {
    *  ended with no PR and no comment). */
   claimsReleased: { number?: number }[];
   blocked: { number?: number; title: string; question?: string }[];
+  /** #1092: open nightly PRs with no review on their current head, the ready issues they hold,
+   * and whether the night was idle because of them. */
+  waitingOnYou: WaitingOnYou;
   runsStopped: { runId?: string; task?: string; status?: string }[];
   /** FAILED Runs of the night (#1042): a model outage ends Runs before they do anything, and a
    * digest that lists only timed-out Runs reports a lost night as `_none_`. */
@@ -309,6 +352,177 @@ export async function collectClaimsReleased(
     path = next ? next[1].replace('https://api.github.com', '') : undefined;
   }
   return [...released].sort((a, b) => a - b).map((number) => ({ number }));
+}
+
+// ---- "Waiting on you" (#1092) ----
+
+/** The owner review state as the digest spells it (lowercase, underscored). */
+function ownerReviewState(state: string | null | undefined): string {
+  switch (state) {
+    case 'APPROVED': return 'approved';
+    case 'CHANGES_REQUESTED': return 'changes_requested';
+    case 'DISMISSED': return 'dismissed';
+    default: return (state ?? 'unknown').toLowerCase();
+  }
+}
+
+/** The required `ci` aggregate's state at one head (#1092 line format): completed `success`
+ * is green, any other completed conclusion is red, absent or still running is pending. An
+ * unreadable or capped check-runs scan is pending too — a head with no verdict on record is
+ * never reported green. */
+async function ciStateAtHead(io: ReportIo, repo: string, headSha: string): Promise<'green' | 'red' | 'pending'> {
+  const checkRuns: CheckRunShim[] = [];
+  let crPath: string | null = `/repos/${repo}/commits/${headSha}/check-runs?per_page=100`;
+  let crPages = 0;
+  let crComplete = false;
+  try {
+    while (crPath && crPages < 3) {
+      const res = await io.get(crPath);
+      if (res.status < 200 || res.status >= 300) break;
+      const body = (res.body ?? null) as { check_runs?: CheckRunShim[] } | null;
+      if (!body || !Array.isArray(body.check_runs)) break; // 2xx unexpected: unreadable page
+      checkRuns.push(...body.check_runs);
+      crPages++;
+      const next = res.link?.match(/<([^>]+)>;\s*rel="next"/)?.[1]?.replace('https://api.github.com', '') ?? null;
+      crPath = next !== null && next.startsWith('/repos/') && next.includes('/check-runs?') ? next : null;
+    }
+    crComplete = crPath === null;
+  } catch {
+    // transport error: unreadable -> pending
+  }
+  if (!crComplete) return 'pending';
+  const ci = checkRuns.find((c) => c.name === RED_CI_CHECK);
+  if (!ci || ci.status !== 'completed') return 'pending';
+  return ci.conclusion === 'success' ? 'green' : 'red';
+}
+
+/** The head commit's timestamp (ms), or null when unreadable: the "no fix was pushed tonight"
+ * half of the idle test. The committer date is when the head COMMIT came to exist — a push
+ * that moved the head during the night shows up here. */
+async function headCommitMs(io: ReportIo, repo: string, headSha: string): Promise<number | null> {
+  let res;
+  try {
+    res = await io.get(`/repos/${repo}/commits/${headSha}`);
+  } catch {
+    return null;
+  }
+  if (res.status < 200 || res.status >= 300) return null;
+  const body = (res.body ?? null) as { commit?: { committer?: { date?: string }; author?: { date?: string } } } | null;
+  for (const d of [body?.commit?.committer?.date, body?.commit?.author?.date]) {
+    const t = d ? Date.parse(d) : NaN;
+    if (Number.isFinite(t)) return t;
+  }
+  return null;
+}
+
+/** The "Waiting on you" section (#1092). The night's queue can deadlock on reviews — every
+ * ready issue held by an open nightly PR nobody has reviewed on its CURRENT head — and a
+ * report with no section for that state reads exactly like a quiet night. Everything is
+ * GitHub state at report time, never memory:
+ *
+ *   - the open nightly PRs (author: the nightly identity), the same list the selector's
+ *     resume scan reads — degraded here, not aborted: the report lists what it read;
+ *   - each PR's last owner/Copilot review via select.ts's copilotHeadState (threads off —
+ *     the report needs the review decision, not the findings); a PR is listed only when the
+ *     review read is COMPLETE and no review of either kind is bound to the current head;
+ *   - the required `ci` check at each listed head (green | red | pending);
+ *   - each listed head's commit time (the idle test);
+ *   - the ready issues (current `nightly:ready` label) held by a listed PR.
+ */
+export async function collectWaitingOnYou(
+  io: ReportIo,
+  repo: string,
+  opts: { night: string; prsOpenedTonight: number },
+): Promise<WaitingOnYou> {
+  const win = nightWindow(opts.night);
+  // 1. Open nightly PRs, bounded like the selector's resume scan (10 pages of 30).
+  const prs: { number?: number; head?: { sha?: string | null; ref?: string | null } | null; user?: { login?: string | null } | null; created_at?: string | null }[] = [];
+  let prPath: string | null = `/repos/${repo}/pulls?state=open&per_page=30`;
+  let prPages = 0;
+  try {
+    while (prPath && prPages < 10) {
+      const res = await io.get(prPath);
+      if (res.status < 200 || res.status >= 300) break; // unreadable page: list what was read
+      if (!Array.isArray(res.body)) break; // 2xx with an unexpected body: same degrade
+      for (const pr of res.body as typeof prs) {
+        if (pr.number !== undefined && pr.user?.login === NIGHTLY_IDENTITY) prs.push(pr);
+      }
+      prPages++;
+      const next = res.link?.match(/<([^>]+)>;\s*rel="next"/)?.[1]?.replace('https://api.github.com', '') ?? null;
+      prPath = next !== null && next.startsWith('/repos/') && next.includes('/pulls?') ? next : null;
+    }
+  } catch {
+    // transport error: list what was read, same policy as the other section reads
+  }
+  // 2. Review state at each head (threads off).
+  const listed: (WaitingPr & { createdAt: string })[] = [];
+  for (const pr of prs) {
+    const headSha = pr.head?.sha ?? '';
+    if (pr.number === undefined || headSha === '') continue; // no head: nothing to evaluate
+    const headState = await copilotHeadState(io, repo, pr.number, headSha, 'waiting scan', { threads: false });
+    // Listed when the review read is COMPLETE and neither the owner's deciding review nor a
+    // Copilot review is bound to the CURRENT head. An incomplete read is not a listing: a
+    // false "waiting" line erodes the digest's trust (the selector fails closed likewise).
+    // A review on an OLDER head does NOT count — the head moved out from under it, and that
+    // is precisely the state this section exists to show (#1092 acceptance 4).
+    const lastOwner = headState.lastOwner;
+    const lastCopilot = headState.lastCopilot;
+    const ownerOnHead = lastOwner !== null && lastOwner.commit_id === headSha;
+    const copilotOnHead = lastCopilot !== null && lastCopilot.commit_id === headSha;
+    if (!headState.complete || ownerOnHead || copilotOnHead) continue;
+    const m = (pr.head?.ref ?? '').match(/^fix\/(issue)-(\d+)-/);
+    listed.push({
+      number: pr.number,
+      ...(m ? { issue: Number(m[2]) } : {}),
+      headSha,
+      ci: 'pending',
+      ...(lastOwner?.commit_id ? { ownerReview: `${ownerReviewState(lastOwner.state)}@${lastOwner.commit_id.slice(0, 7)}` } : {}),
+      ...(lastCopilot?.commit_id ? { copilotReview: lastCopilot.commit_id.slice(0, 7) } : {}),
+      createdAt: pr.created_at ?? '',
+    });
+  }
+  for (const w of listed) w.ci = await ciStateAtHead(io, repo, w.headSha);
+  listed.sort((a, b) => a.number - b.number);
+  // 3. Idle test: section non-empty, no PR opened tonight, and no listed head touched during
+  // the night. A head commit at/after local midnight is a push that night (a resume push or a
+  // merge from main), so the night was not idle; an unreadable head commit is the same —
+  // "idle" is claimed only when every listed head is verifiably older than the window.
+  let idle = listed.length > 0 && opts.prsOpenedTonight === 0;
+  if (idle) {
+    for (const w of listed) {
+      const t = await headCommitMs(io, repo, w.headSha);
+      if (t === null || t >= win.startMs) { idle = false; break; }
+    }
+  }
+  // 4. Ready issues held by a listed PR: the CURRENT label (this section displays; the
+  // selector's timeline-trusted ready decides work), bounded like collectBlocked.
+  const heldBy = new Map<number, number>(); // issue -> oldest listed PR number
+  for (const w of [...listed].sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.number - b.number)) {
+    if (w.issue === undefined) continue;
+    if (!heldBy.has(w.issue)) heldBy.set(w.issue, w.number); // first (oldest) wins
+  }
+  const held: { issue: number; pr: number }[] = [];
+  for (let page = 1; page <= SEARCH_CAP; page++) {
+    const path = `/repos/${repo}/issues?labels=${encodeURIComponent(L_READY)}&state=open&per_page=100&page=${page}`;
+    let res;
+    try {
+      res = await io.get(path);
+    } catch {
+      break; // transport error: no held list, the PR lines still stand
+    }
+    if (res.status < 200 || res.status >= 300) break;
+    const issues = res.body as { number?: number; pull_request?: unknown }[] | null;
+    if (!Array.isArray(issues)) break;
+    for (const it of issues) {
+      if (it.number === undefined || it.pull_request !== undefined) continue;
+      const pr = heldBy.get(it.number);
+      if (pr !== undefined) held.push({ issue: it.number, pr });
+    }
+    if (issues.length < 100) break;
+  }
+  held.sort((a, b) => a.issue - b.issue);
+  const prsOut: WaitingPr[] = listed.map(({ createdAt: _c, ...w }) => w);
+  return { prs: prsOut, held, idle };
 }
 
 
@@ -820,6 +1034,13 @@ function digestBody(night: string, data: ReportData, note?: string): string {
   const versionLine = skillVersionsNote(data.skillVersions);
   if (versionLine) lines.push(versionLine, '');
   if (note) lines.push(`_${note}_`, '');
+  // #1092: an idle night must not read as a quiet night. When the queue is deadlocked on
+  // review, the summary is the digest's first content line — below the version line (which
+  // keeps its first-line position, #1024) and above every section.
+  if (data.waitingOnYou.idle) {
+    const n = data.waitingOnYou.prs.length;
+    lines.push(`_Idle night: ${n} nightly PR${n === 1 ? '' : 's'} await review._`, '');
+  }
   let size = lines.join('\n').length;
   const fits = (s: string): boolean => {
     // +1 accounts for the joining newline between pushed entries.
@@ -866,6 +1087,15 @@ function digestBody(night: string, data: ReportData, note?: string): string {
     return out.join('\n');
   };
   section('## PRs opened', () => list(data.prs, '_none_'));
+  // #1092: the deadlock section renders right after PRs opened (it is about those PRs) and
+  // early in the render order, so the shared 60 KB budget protects it like the other early
+  // sections. Empty state is _none_ like every section.
+  section('## Waiting on you (nightly PRs with no review on their current head)', () =>
+    bounded([
+      ...data.waitingOnYou.prs.map((w) =>
+        `- #${w.number}${w.issue !== undefined ? ` (#${w.issue})` : ''} — head ${codeSpan(w.headSha.slice(0, 7), 12)}, CI ${w.ci}, last owner review ${w.ownerReview ?? 'none'}, last Copilot review ${w.copilotReview ?? 'none'}`),
+      ...data.waitingOnYou.held.map((h) => `- #${h.issue} held by #${h.pr}`),
+    ], '_none_'));
   section('## Issues filed', () => list(data.issuesFiled, '_none_'));
   section('## Issues commented', () => list(data.issuesCommented, '_none_'));
   // #1024: the two recovery sections render EARLY, BEFORE the claims-released list (and before
@@ -986,6 +1216,9 @@ export async function runReport(
     win.startMs, win.endMs - 1000);
   const claimsReleased = await collectClaimsReleased(io, opts.repo, win.startMs, win.endMs - 1000);
   const blocked = await collectBlocked(io, opts.repo);
+  // #1092: the "Waiting on you" section reads GitHub state at report time; the idle test needs
+  // the PR-opened count, so it runs after the searches (the section degrades like the others).
+  const waitingOnYou = await collectWaitingOnYou(io, opts.repo, { night: opts.night, prsOpenedTonight: prs.length });
   const runsStopped = io.mercury ? await collectRunsStopped(io.mercury, opts.night) : [];
   const runsFailed = io.mercury ? await collectFailedRuns(io.mercury, opts.night) : [];
   // #1024: one pass over the night's Runs feeds both the unpushed-commit section and the
@@ -1007,7 +1240,7 @@ export async function runReport(
   // #964: the digest shows the last FLAKE_REPORT_WINDOW_NIGHTS nights and only counts the rest.
   const { visible: flakes, older: flakesOlder } = flakesInWindow(collectFlakes(env, opts.night), opts.night);
   const data: ReportData = {
-    prs, issuesFiled, issuesCommented, claimsReleased, blocked, runsStopped, runsFailed,
+    prs, issuesFiled, issuesCommented, claimsReleased, blocked, waitingOnYou, runsStopped, runsFailed,
     unpushedCommits, runsWithoutTerminalCall, ...(skillVersions ? { skillVersions } : {}),
     flakes, flakesOlder,
   };

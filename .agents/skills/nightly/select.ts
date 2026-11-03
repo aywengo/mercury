@@ -64,7 +64,7 @@ const COPILOT_THREAD_AUTHORS = new Set([COPILOT_REVIEWER, 'copilot-pull-request-
  * trust root must NOT be configurable from a Run's environment: an env override would let the
  * process under test grant itself trust. Change it here, in code review, when the identity changes.
  */
-const NIGHTLY_IDENTITY = 'mercury-nightly';
+export const NIGHTLY_IDENTITY = 'mercury-nightly';
 const L_READY = 'nightly:ready';
 const L_IN_PROGRESS = 'nightly:in-progress';
 const L_BLOCKED = 'nightly:blocked';
@@ -665,6 +665,11 @@ export async function copilotHeadState(
   prNumber: number,
   headSha: string,
   logPrefix = 'resume scan',
+  /** `threads: false` (#1092): the caller only needs the last-review (head, state) decision,
+   * not the pending findings. The GraphQL thread query is skipped entirely, so `complete`
+   * reflects the REST review-list read alone and `io.postJson` is not required; `findings`
+   * stays empty and a threads-off caller must not read it. */
+  opts: { threads?: boolean } = {},
 ): Promise<CopilotHeadState> {
   const out: CopilotHeadState = { complete: true, lastCopilot: null, lastOwner: null, findings: [] };
   // Last Copilot review on this PR (REST, bounded at 5 pages).
@@ -697,6 +702,10 @@ export async function copilotHeadState(
       rvPath = rvNext !== null && rvNext.includes(`/pulls/${prNumber}/reviews?`) ? rvNext : null;
     }
     out.complete = !rvPath;
+    // #1092: threads-off consumers (the report's "Waiting on you" section) only need the
+    // last-review decision — they never read `findings`, so the thread query is skipped and
+    // an incomplete thread read cannot mark this review read incomplete.
+    if (opts.threads === false) return out;
     // Pending findings: UNRESOLVED, NOT-OUTDATED review threads whose first comment is the
     // Copilot reviewer's AND was authored against the CURRENT head (#820 r3, blocker 4): a
     // clean current-head review must not inherit an older review's stale threads, an unrelated
