@@ -120,8 +120,12 @@ export interface ResumeCandidate {
    *  It outranks Copilot findings: the owner's review is the one that gates the merge.
    *  'red-ci' = the required aggregate `ci` check on THIS head completed with conclusion
    *  failure (#980): the bot's own PR is red, and no review should be needed to say so. It
-   *  outranks Copilot findings; owner change requests still outrank it. */
-  state: 'findings' | 'owner-changes' | 'red-ci';
+   *  outranks Copilot findings; owner change requests still outrank it.
+   *  'conflicted' = the PR's current head reports `mergeable_state: dirty` (#1015): GitHub
+   *  computed the mergeability and the head conflicts with main — the PR can never merge as-is.
+   *  Same tier as red ci (both block merge, both cheaper to fix than to leave); owner change
+   *  requests still outrank it. `unknown` (not computed yet) and `clean` are NOT signals. */
+  state: 'findings' | 'owner-changes' | 'red-ci' | 'conflicted';
   /** red-ci only: the failing job names on this head, comma-joined, for the selection reason. */
   failingJobs?: string;
   /** Older first: with two open PRs for one issue the OLDER one is continued (the acceptance
@@ -441,10 +445,11 @@ export function selectLadder(
 ): Selection {
   // Rung 0 (resume, #819): finish what an earlier night opened before starting anything new.
   // Metadata-only inputs: an open nightly PR whose branch maps to an open issue
-  // (fix/issue-<N>-*) with Copilot findings on its current head. Review-REQUEST fetching is
-  // the relay's job (a head without a review is skipped here - the relay will fetch one).
-  // Resume does NOT wait for tonight's e2e verdict: addressing review remarks on an existing
-  // PR is not new work racing the E2E window.
+  // (fix/issue-<N>-*) with a resume signal on its current head: an owner changes-requested
+  // review (#968), a conflicted head (#1015), red ci (#980), or Copilot findings.
+  // Review-REQUEST fetching is the relay's job (a head without a review is skipped here - the
+  // relay will fetch one). Resume does NOT wait for tonight's e2e verdict: addressing remarks
+  // or conflicts on an existing PR is not new work racing the E2E window.
   const resume = opts.resume ?? [];
   if (resume.length > 0) {
     const byNumber = new Map(candidates.map((c) => [c.issue.number, c] as const));
@@ -458,9 +463,11 @@ export function selectLadder(
       const top = byIssue.get(r.issue);
       if (top === undefined || r.createdAt < top.createdAt) byIssue.set(r.issue, r);
     }
-    // Owner change requests first (#968), then red ci (#980), then Copilot findings;
-    // oldest-first within each tier.
-    const rank = (r: ResumeCandidate): number => (r.state === 'owner-changes' ? 0 : r.state === 'red-ci' ? 1 : 2);
+    // Owner change requests first (#968), then conflicted heads (#1015) and red ci (#980) —
+    // the same tier, both block merge and both are cheaper to fix than to leave — then Copilot
+    // findings; oldest-first within each tier.
+    const rank = (r: ResumeCandidate): number =>
+      (r.state === 'owner-changes' ? 0 : r.state === 'red-ci' || r.state === 'conflicted' ? 1 : 2);
     const ordered = [...byIssue.entries()].sort((a, b) => rank(a[1]) - rank(b[1]) || a[1].createdAt.localeCompare(b[1].createdAt));
     if (ordered.length > 0) {
       const [issue, r] = ordered[0]!;
@@ -468,6 +475,8 @@ export function selectLadder(
         ? `has @${TRUSTED_AUTHOR}'s changes-requested review on its head to address (review body and any inline threads)`
         : r.state === 'red-ci'
         ? `has red ci on head ${r.headSha}: ${r.failingJobs ?? 'unknown job'}`
+        : r.state === 'conflicted'
+        ? `is conflicted with main on head ${r.headSha}`
         : 'has Copilot findings on its head to address';
       return {
         rung: 0,
@@ -1106,12 +1115,40 @@ export async function runSelectorWith(
         // pushed after the review moves the head, so an answered review waits for re-review
         // instead of being resumed again. Owner precedence applies only when the review evidence
         // is COMPLETE — an incomplete scan cannot decide whose review is the latest (#980
-        // review r5). Excluded issues never resume.
+        // review r5).
+        // Excluded issues (nightly:blocked after hand-off, proposed) never resume (#820 r1,
+        // blocker 1): the review cannot re-open work a human must answer. One guard covers
+        // every signal below (owner, conflict, red ci, findings).
+        if (isExcluded(issueCandidate.issue)) continue;
         const lastOwner = headState.lastOwner;
-        if (headState.complete && lastOwner !== null && lastOwner.state === 'CHANGES_REQUESTED' && lastOwner.commit_id === headSha
-          && !isExcluded(issueCandidate.issue)) {
+        if (headState.complete && lastOwner !== null && lastOwner.state === 'CHANGES_REQUESTED' && lastOwner.commit_id === headSha) {
           resume.push({ issue, prNumber: pr.number, headSha, state: 'owner-changes', createdAt: pr.created_at ?? '' });
           continue;
+        }
+        // Conflicted with main on the CURRENT head (#1015): GitHub's PR LIST response omits
+        // mergeable/mergeable_state (measured 2026-11-03, #1099 review r1) — the DETAIL
+        // endpoint computes and reports them. `dirty` means GitHub computed the mergeability
+        // and the head conflicts with the base branch: such a PR can never merge as-is, so it
+        // is resume work whether or not a review or CI speaks up. `unknown` is "not computed
+        // yet", not "conflicted" (the next night re-reads it), and `clean` is mergeable:
+        // neither is a signal. The detail read is not review evidence (#980 review r5): it
+        // runs even when the review scan is incomplete, and it outranks red ci for the same
+        // PR: resolving the conflict merges main and re-runs CI on a head that can actually
+        // merge. An unreadable detail response fails the signal closed for THIS PR (the
+        // issue stays reserved, the other signals still apply) — the same discipline as a
+        // capped check-runs scan.
+        {
+          let dirty = false;
+          try {
+            const { body } = (await io.get(`/repos/${repo}/pulls/${pr.number}`)) as { body: { mergeable_state?: string | null } | null; link?: string | null };
+            dirty = body !== null && typeof body === 'object' && body.mergeable_state === 'dirty';
+          } catch (e) {
+            console.error(`resume scan: PR #${pr.number} detail failed: ${String(e instanceof Error ? e.message : e)}`);
+          }
+          if (dirty) {
+            resume.push({ issue, prNumber: pr.number, headSha, state: 'conflicted', createdAt: pr.created_at ?? '' });
+            continue;
+          }
         }
         // Red CI on the CURRENT head (#980): the required aggregate check completed with
         // conclusion failure. Check runs are GitHub metadata (names, statuses, conclusions and
@@ -1189,9 +1226,6 @@ export async function runSelectorWith(
         if (!hasHeadReview || lastCopilot === null) continue; // relay fetches the review first
         if (lastCopilot.state === 'APPROVED') continue; // awaiting merge; not resume work
         if (headState.findings.length === 0) continue; // approval-class or fully addressed: awaits merge
-        // Excluded issues (nightly:blocked after hand-off, proposed) never resume (#820 r1,
-        // blocker 1): the review cannot re-open work a human must answer.
-        if (isExcluded(issueCandidate.issue)) continue;
         resume.push({ issue, prNumber: pr.number, headSha, state: 'findings', createdAt: pr.created_at ?? '' });
         if (pr.supersededBy.length > 0) {
           console.error(`resume scan: PR #${pr.number} continues for issue #${issue}; newer duplicate(s) superseded: ${pr.supersededBy.map((n) => '#' + n).join(', ')}`);
