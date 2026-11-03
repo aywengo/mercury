@@ -55,9 +55,11 @@ no network at install time.
 Contents: `dist/`, `src/`, `client/`, `ui/`, `deploy/`, `*-agents/`, `.agents/`, `LICENSE`,
 `README.md`, `QUICKSTART.md`, `package.json`, and a production-only `node_modules/`.
 
-Measured: **5.8 MB staged, 1.2 MB as `.tar.gz`**, 795 files / 3.9 MB installed, 3 s install.
-The footprint is small because the production dependency tree is a single package
-(`express`, 68 packages transitively, 3.9 MB).
+Measured 2026-11-03 at v0.2.7: **14.1 MB staged, 3.0 MB as `.tar.gz`**, 787 `node_modules`
+files / 8.9 MB installed — after the optional-peer trim decided below (#999); before it the
+same build was 26.6 MB staged, 5.1 MB compressed, 1959 files / 21.4 MB. The production tree is
+`express` plus `@a2a-js/sdk`'s single runtime dependency (`jose`); the SDK's optional peer
+trees are not in the bundle.
 
 Name: `mercury-<version>-bundle.tar.gz`, attached to the `host-v<version>` GitHub Release.
 Built by `scripts/build-bundle.mjs`, whose staged file list is **derived from
@@ -363,5 +365,24 @@ Still not observed:
   what makes the offline verification above possible. The alternative -- the formula running
   `npm install --omit=dev` -- would make every install depend on the registry and on
   Homebrew's sandbox network policy, to save about one megabyte.
+- **The bundle trims optional peer trees (`--omit=optional`).** Decided 2026-11-03 in
+  response to #999: `@a2a-js/sdk` declares `@grpc/grpc-js` among seven optional peers, and
+  while `package.json` carries a `devDependencies` block npm keeps that peer's whole tree in
+  the bundle's `--omit=dev` install -- the full ideal tree already contains the peer via the
+  `testcontainers` devDependency, and the trim is the `--omit=optional` flag on the install
+  in `scripts/build-bundle.mjs`. Measured at v0.2.7 on the staged tree (the bundle's own
+  install): npm counts **107 packages before, 70 after**, and the removed set is exactly the
+  gRPC tree -- 39 package directories counting the nested copies (`@grpc/grpc-js`,
+  `@grpc/proto-loader`, `protobufjs`, `@protobufjs/*`, `yargs` + its tree,
+  `lodash.camelcase`, `long`, `@types/node`, `undici-types`, and its transitives). The
+  tarball goes 5.1 -> 3.0 MB, installed `node_modules` 21.4 -> 8.9 MB. The issue's
+  lockfile-based measurement shows the same cost another way: 107 packages with the SDK,
+  68 without. Nothing in `src/` imports the gRPC subpath -- Mercury's A2A surface is the
+  HTTP+JSON/REST binding -- and the trimmed tree imports and loads every subpath `src/a2a`
+  uses (`@a2a-js/sdk`, `/server`, `/server/express`, `/errors`). The other six optional peers
+  were never installed (they are not in the tree), so the flag only trims what was actually
+  carried. **Precondition:** this holds while the A2A surface stays HTTP+JSON/REST; if a
+  gRPC binding ever lands, remove `--omit=optional` and change the guard in
+  `test/bundle.test.ts` with it.
 - **The formula lives in this repository, not a separate tap.** See *Tap* above.
 - **The formula is generated, not committed.** See *Version and sha256 updates* above.
