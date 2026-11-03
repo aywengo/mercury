@@ -58,10 +58,19 @@ writeFileSync(join(stage, 'package.json'), JSON.stringify(pkg, null, 2) + '\n');
 // Production dependencies only, and --ignore-scripts because the only prod dependency with
 // a script is express's transitive tree and a lifecycle failure here would be indistinguishable
 // from a real packaging problem in CI logs.
-const npm = spawnSync('npm', ['install', '--omit=dev', '--no-audit', '--no-fund', '--ignore-scripts'],
+//
+// --omit=optional trims the SDK's optional peer trees (#999): while package.json carries a
+// devDependencies block, npm keeps the @a2a-js/sdk optional peer @grpc/grpc-js and its whole
+// tree (39 package directories, npm count 107 -> 70) in the --omit=dev install, because the
+// full ideal tree already contains
+// the peer via the testcontainers devDependency. Mercury's A2A surface is the HTTP+JSON/REST
+// binding and never imports the gRPC subpath, so the tree is dead weight in the bundle
+// (5.1 -> 3.0 MB tarball, 21.4 -> 8.9 MB installed, measured 2026-11-03). The decision and
+// its precondition are recorded in docs/distribution.md.
+const npm = spawnSync('npm', ['install', '--omit=dev', '--omit=optional', '--no-audit', '--no-fund', '--ignore-scripts'],
   { cwd: stage, encoding: 'utf8', timeout: 900_000 });
 if (npm.status !== 0) {
-  console.error(`npm install --omit=dev failed:\n${npm.stdout}\n${npm.stderr}`);
+  console.error(`npm install --omit=dev --omit=optional failed:\n${npm.stdout}\n${npm.stderr}`);
   process.exit(1);
 }
 if (!existsSync(join(stage, 'node_modules'))) {

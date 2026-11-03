@@ -69,10 +69,15 @@ test('the bundle ships every bin target and a package.json to describe them', ()
  *
  * The devDependency check below needs this because "a devDependency is in the bundle" is not by
  * itself evidence that --omit=dev stopped working: a production dependency may legitimately pull
- * one in. `@a2a-js/sdk` does exactly that -- it declares `@grpc/grpc-js` as an OPTIONAL peer for its
- * gRPC binding, npm resolves that peer from the lockfile (where the `testcontainers` devDependency
- * already put it) and installs its tree, and `protobufjs` in that tree requires `@types/node`.
- * Without this walk the guard would have to be deleted or allowlisted by hand.
+ * one in, and the walk is the general guard against that case.
+ *
+ * History: `@a2a-js/sdk` hit exactly this -- it declares `@grpc/grpc-js` as an OPTIONAL peer for
+ * its gRPC binding, and while package.json carries a devDependencies block npm keeps that peer's
+ * tree in a --omit=dev install (the full ideal tree already has it via the `testcontainers`
+ * devDependency, and `protobufjs` in the tree requires `@types/node`), so the check once had to
+ * allowlist the walked set by hand. The bundle build now passes --omit=optional and trims that
+ * tree (#999; decision in docs/distribution.md), so nothing dev-named is in the bundle today --
+ * the walk stays because a future production tree could still share a devDependency's name.
  *
  * Walks `dependencies` AND `peerDependencies`, but only into entries the lockfile actually has:
  * npm resolves an optional peer from what is already in the tree, so a peer that is not in the
@@ -117,6 +122,25 @@ test('the bundle vendors production dependencies but no devDependencies', () => 
     assert.ok(!names.some((n) => n.includes(`/node_modules/${dev}/`)),
       `devDependency ${dev} leaked into the bundle`);
   }
+});
+
+test('the bundle trims the SDK optional peer tree (#999)', () => {
+  // @a2a-js/sdk declares @grpc/grpc-js among seven OPTIONAL peers for bindings Mercury never
+  // imports: src/a2a is the HTTP+JSON/REST surface, and nothing in src/ references the gRPC
+  // subpath. While package.json carries a devDependencies block, npm keeps that peer's whole
+  // tree in a --omit=dev install, so the trim is the --omit=optional flag in
+  // scripts/build-bundle.mjs and this test proves it stuck: the whole gRPC tree is gone
+  // (39 package directories, npm count 107 -> 70), 5.1 -> 3.0 MB of tarball. If a gRPC
+  // binding ever lands, the decision in
+  // docs/distribution.md says to remove the flag, and this test changes with it.
+  const { names } = buildBundle();
+  for (const marker of ['@grpc/grpc-js', '@grpc/proto-loader', 'protobufjs/', '@protobufjs/']) {
+    assert.ok(!names.some((n) => n.includes(`/node_modules/${marker}`)),
+      `optional peer tree leaked into the bundle: ${marker}`);
+  }
+  // the trim reaches only the peer tree: the SDK's one real runtime dependency is still vendored
+  assert.ok(names.some((n) => n.includes('/node_modules/jose/')),
+    'jose, the only runtime dependency of @a2a-js/sdk, is missing from the trimmed bundle');
 });
 
 test('the bundle carries no test tree and no credentials', () => {

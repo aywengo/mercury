@@ -64,7 +64,7 @@ Record: [`docs/nightly-self-development.md`](docs/nightly-self-development.md)
 | #968 | nightly: resume PRs on the owner's changes-requested review, not only on Copilot findings | done | #969 |
 | #980 | nightly: resume its own PRs when the required ci check is red, not only on reviews | done | #981 |
 | #1020 | nightly: nothing notices a night with no report (host down 2026-10-19→20) | done | #1021 |
-| #1015 | nightly: resume its own PRs when the head is conflicted with main | open | — |
+| #1015 | nightly: resume its own PRs when the head is conflicted with main | done | #1099 |
 | #1092 | nightly report: a "Waiting on you" section for nightly PRs with no review on their current head | open | — |
 | #1023 | URGENT nightly host runs Mercury 0.2.0/0.2.1: stale skills; resume Runs commit but never push | done | — |
 | #1024 | nightly: flag Runs that end with unpushed commits or without finish/blocked; report the loaded skill version | done | #1025 |
@@ -224,7 +224,7 @@ on Mercury's own Express app, so A1 can start.
 | #988 | Server-stamped Run origin: a field no request body can set (A0-3) | done | #996 |
 | #990 | Pure Run-chain → A2A TaskState mapping, exhaustive over RunStatus (A0-4) | done | #998 |
 | #989 | Exposed-skill config, create-Run validation of every template, `host a2a validate` (A0-5) | open | — |
-| #999 | release: the A2A SDK optional gRPC peer adds 39 packages to every install | open | — |
+| #999 | release: the A2A SDK optional gRPC peer adds 39 packages to every install | done | #1101 |
 | #1030 | test: a2aServer section 6.6 blocking-bound test is timing-flaky and can block a release PR | done | #1039 |
 | #1040 | nightly: a crashed model server still lets the Run claim an issue, so the night ends with 17 failed Runs and stale claims | done | #1041 |
 | #1042 | nightly report: a model outage makes the digest say _none_ everywhere, so a lost night reads as a quiet one | done | #1043 |

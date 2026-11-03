@@ -200,7 +200,8 @@ search and reports without creating.
   Run) plays the implementer role the loop's procedure assigns.
 - **`fix-loop` on rung 0 (resume, #819)**: the claimed issue already has an open nightly PR
   whose head carries Copilot findings, whose head carries @aywengo's changes-requested review
-  (#968; owner reviews resume first), or whose head has red CI (#980): the required `ci` check
+  (#968; owner reviews resume first), whose head is conflicted with main (#1015; same tier as
+  red CI — both block merge), or whose head has red CI (#980): the required `ci` check
   completed with conclusion `failure`, with the failing job names in the selection reason — a
   job whose conclusion is `failure`, `timed_out` or `cancelled` is a failing job, and only a
   check still running, or with an unknown state, means "wait"; a failed aggregate with no
@@ -211,7 +212,12 @@ search and reports without creating.
   job resumes). A failure confined to known flakes from the nightly-e2e flake clock is not a
   signal on its own. For a red-CI resume, fetch the evidence
   yourself before pushing: `gh run view <run-id> --log-failed` (trimmed) for the first failing
-  test or compiler lines, and re-run `npx tsc --noEmit -p .` and the full suite locally. Do NOT
+  test or compiler lines, and re-run `npx tsc --noEmit -p .` and the full suite locally. For a
+  conflicted resume (#1015), `mergeable_state: dirty` is GitHub's computed conflict — `unknown`
+  is "not computed yet" and is NOT a signal. Merge `main` into the branch (NEVER a force-push
+  rebase), resolve the conflicts, re-run `npx tsc --noEmit -p .` and the full suite, and push
+  once; conflict resolutions count against the same step-5 cap as review rounds, and at the cap
+  the hand-off lists the conflicted files. Do NOT
   open a new PR: address the findings on the existing
   branch (fix-loop step 5, at most 2 rounds, one batched push). For an owner review, the findings
   are the review BODY plus any inline threads: read `gh pr view <n> --json reviews` and the
