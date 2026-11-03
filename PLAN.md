@@ -64,7 +64,7 @@ Record: [`docs/nightly-self-development.md`](docs/nightly-self-development.md)
 | #968 | nightly: resume PRs on the owner's changes-requested review, not only on Copilot findings | done | #969 |
 | #980 | nightly: resume its own PRs when the required ci check is red, not only on reviews | done | #981 |
 | #1020 | nightly: nothing notices a night with no report (host down 2026-10-19→20) | done | #1021 |
-| #1015 | nightly: resume its own PRs when the head is conflicted with main | open | — |
+| #1015 | nightly: resume its own PRs when the head is conflicted with main | done | #1099 |
 | #1092 | nightly report: a "Waiting on you" section for nightly PRs with no review on their current head | open | — |
 | #1023 | URGENT nightly host runs Mercury 0.2.0/0.2.1: stale skills; resume Runs commit but never push | done | — |
 | #1024 | nightly: flag Runs that end with unpushed commits or without finish/blocked; report the loaded skill version | done | #1025 |
