@@ -308,7 +308,8 @@ order, so an oversized night truncates the LATER sections first):
   <state@sha7|none>, last Copilot review <sha7|none>`), then the ready issues held by such a PR
   (`#<issue> held by #<pr>`, the oldest listed PR when a ready issue has two). A PR whose last
   review sits on an OLDER head (the head moved by a merge) is listed too — that is the deadlock
-  state. When the section is non-empty, no PR was opened tonight, and no nightly PR head
+  state. When the open-PR scan ran to the end (a failed or capped page scan cannot prove no
+  head was touched), the section is non-empty, no PR was opened tonight, and no nightly PR head
   (listed or not) was touched during the night, the digest's first content line says
   `Idle night: N nightly PRs await review` (below the version line, which keeps its first
   position, #1024).

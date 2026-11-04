@@ -111,10 +111,11 @@ export interface WaitingOnYou {
   /** Ready issues held by a listed PR (`#<issue> held by #<pr>`); the OLDEST listed PR when a
    *  ready issue has two listed PRs. */
   held: { issue: number; pr: number }[];
-  /** The first-line summary condition: the section is non-empty, no PR was opened tonight, and
-   *  no nightly PR head (LISTED or not) was touched during the night (every head commit
-   *  predates local midnight). An unreadable head commit counts as touched: unknown never
-   *  claims "idle". */
+  /** The first-line summary condition: the open-PR scan COMPLETED (a partial scan cannot
+   *  prove no head was touched), the section is non-empty, no PR was opened tonight, and no
+   *  nightly PR head (LISTED or not) was touched during the night (every head commit predates
+   *  local midnight). An unreadable head commit counts as touched: unknown never claims
+   *  "idle". */
   idle: boolean;
 }
 
@@ -429,7 +430,9 @@ async function headCommitMs(io: ReportIo, repo: string, headSha: string): Promis
  *   - the required `ci` check at each listed head (green | red | pending);
  *   - every open nightly PR head's commit time (the idle test covers listed AND unlisted
  *     heads: a push during the night to a PR that carries a current-head review, or whose
- *     review read was incomplete, still makes the night not idle — #1092 acceptance 3).
+ *     review read was incomplete, still makes the night not idle — #1092 acceptance 3), and
+ *     only when the open-PR scan itself ran to the end — a fix pushed during the night could
+ *     sit on an unread page, and "idle" is a claim about ALL heads (#1092 review r2).
  *   - the ready issues (current `nightly:ready` label) held by a listed PR.
  */
 export async function collectWaitingOnYou(
@@ -442,6 +445,10 @@ export async function collectWaitingOnYou(
   const prs: { number?: number; head?: { sha?: string | null; ref?: string | null } | null; user?: { login?: string | null } | null; created_at?: string | null }[] = [];
   let prPath: string | null = `/repos/${repo}/pulls?state=open&per_page=30`;
   let prPages = 0;
+  /** The scan read EVERY open PR page: the loop ended on a missing next link, with no break
+   * and no catch. A fix pushed during the night could sit on an unread page, so the idle test
+   * needs this; a partial scan still lists the waiting PRs it did read (#1092 review r2). */
+  let prScanComplete = false;
   try {
     while (prPath && prPages < 10) {
       const res = await io.get(prPath);
@@ -454,6 +461,10 @@ export async function collectWaitingOnYou(
       const next = res.link?.match(/<([^>]+)>;\s*rel="next"/)?.[1]?.replace('https://api.github.com', '') ?? null;
       prPath = next !== null && next.startsWith('/repos/') && next.includes('/pulls?') ? next : null;
     }
+    // Every incomplete exit leaves prPath non-null (a break on the failed page, or the 10-page
+    // cap with a next link still present); only a walk that ends on a missing next link sets it
+    // null. A throw skips this line entirely and lands in the catch below.
+    prScanComplete = prPath === null;
   } catch {
     // transport error: list what was read, same policy as the other section reads
   }
@@ -489,12 +500,13 @@ export async function collectWaitingOnYou(
   }
   for (const w of listed) w.ci = await ciStateAtHead(io, repo, w.headSha);
   listed.sort((a, b) => a.number - b.number);
-  // 3. Idle test: section non-empty, no PR opened tonight, and no nightly PR head touched
-  // during the night — LISTED or not. A head commit at/after local midnight is a push that
-  // night (a resume push, a merge from main, or a fix on a PR whose review then landed on the
-  // new head), so the night was not idle; an unreadable head commit is the same — "idle" is
-  // claimed only when every nightly head is verifiably older than the window.
-  let idle = listed.length > 0 && opts.prsOpenedTonight === 0;
+  // 3. Idle test: the PR scan COMPLETED (an unread page could hide a fix pushed during the
+  // night — #1092 review r2), section non-empty, no PR opened tonight, and no nightly PR head
+  // touched during the night — LISTED or not. A head commit at/after local midnight is a push
+  // that night (a resume push, a merge from main, or a fix on a PR whose review then landed on
+  // the new head), so the night was not idle; an unreadable head commit is the same — "idle"
+  // is claimed only when every nightly head is verifiably older than the window.
+  let idle = prScanComplete && listed.length > 0 && opts.prsOpenedTonight === 0;
   if (idle) {
     for (const headSha of allHeads) {
       const t = await headCommitMs(io, repo, headSha);

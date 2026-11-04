@@ -33,6 +33,10 @@ function ioWith(opts: {
   mercury?: boolean;
   /** #1092: open PRs (the "Waiting on you" scan filters by the nightly identity itself). */
   prs?: { number: number; user: { login: string }; head: { sha: string; ref?: string }; created_at?: string }[];
+  /** #1092 review r2: a PAGED open-PR listing for the "Waiting on you" scan. `?page=N`
+   * (default 1) maps to pullsPages[N-1]; a missing entry reads as 404, and each entry's
+   * `link` header drives paging exactly like GitHub's. */
+  pullsPages?: { status?: number; body?: unknown; link?: string }[];
   /** #1092: REST reviews per PR number, oldest-first. */
   reviews?: Record<number, { user: { login: string }; state: string; commit_id?: string }[]>;
   /** #1092: check runs per head sha. */
@@ -62,6 +66,12 @@ function ioWith(opts: {
       }
       // #1092: the "Waiting on you" reads.
       if (path.startsWith(`/repos/${REPO}/pulls?state=open`)) {
+        if (opts.pullsPages) {
+          const page = Number(new URLSearchParams(path.split('?')[1]).get('page') ?? '1');
+          const entry = opts.pullsPages[page - 1];
+          if (!entry) return { body: { message: 'no page' }, status: 404 };
+          return { body: entry.body ?? [], status: entry.status ?? 200, link: entry.link ?? null };
+        }
         return { body: opts.prs ?? [], status: 200 };
       }
       const rv = path.match(/\/pulls\/(\d+)\/reviews/);
@@ -2044,5 +2054,61 @@ test('#1092: a ready issue with two listed PRs is held by the OLDEST', async () 
   const out = await runReport(io, ENV, { repo: REPO, night: '2026-09-26', dryRun: true });
   assert.deepEqual(out.waitingOnYou.prs.map((w) => w.number).sort(), [950, 960]);
   assert.deepEqual(out.waitingOnYou.held, [{ issue: 860, pr: 950 }], 'the older PR (950, created earlier) holds the issue');
+});
+
+test('#1092 review r2: a failed open-PR page suppresses the idle summary', async () => {
+  // Page 1 holds an unreviewed nightly PR with an old head; page 2 fails (500). The scan is
+  // INCOMPLETE — a fix pushed during the night could sit on the unread page — so the read PR
+  // is still listed, but the night cannot be claimed idle.
+  const { io, calls } = ioWith({
+    pullsPages: [
+      {
+        body: [{ number: 901, user: NIGHTLY, head: { sha: HEAD_A, ref: 'fix/issue-860-a' }, created_at: '2026-09-20T01:00:00Z' }],
+        link: `<https://api.github.com/repos/${REPO}/pulls?state=open&per_page=30&page=2>; rel="next"`,
+      },
+      { body: { message: 'boom' }, status: 500 },
+    ],
+    checkRuns: { [HEAD_A]: [{ name: 'ci', status: 'completed', conclusion: 'success' }] },
+    commitDates: { [HEAD_A]: BEFORE_NIGHT }, // the READ head is old: only the partial scan suppresses
+  });
+  const out = await runReport(io, ENV, { repo: REPO, night: '2026-09-26', dryRun: false });
+  assert.deepEqual(out.waitingOnYou.prs.map((w) => w.number), [901], 'the read PR is still listed');
+  assert.equal(out.waitingOnYou.idle, false, 'a partial open-PR scan cannot claim an idle night');
+  const created = calls.find((c) => c.method === 'POST' && c.path.endsWith('/issues'))!;
+  const body = String((created.body as { body: string }).body);
+  assert.ok(!body.includes('Idle night'), 'no first-line summary on a partial scan');
+  assert.match(body, /- #901 \(#860\) — head `aaaaaaa`, CI green, last owner review none, last Copilot review none/);
+  const pullCalls = calls.filter((c) => c.method === 'GET' && c.path.startsWith(`/repos/${REPO}/pulls?state=open`));
+  assert.equal(pullCalls.length, 2, 'the scan stops at the failed page');
+});
+
+test('#1092 review r2: hitting the 10-page cap with a next link suppresses the idle summary', async () => {
+  // Ten full pages (30 PRs each, per_page=30) and EVERY page — the 10th included — carries a
+  // next link: the loop stops at the cap with the scan unfinished, so the night is not idle
+  // even though every head that was read is old.
+  const fills = (page: number) => Array.from({ length: 30 }, (_, i) => ({
+    number: page * 100 + i,
+    user: { login: 'someone-else' },
+    head: { sha: 'f'.repeat(36) + String(page * 100 + i).padStart(4, '0'), ref: 'feature/x' },
+  }));
+  const pullsPages = Array.from({ length: 10 }, (_, i) => ({
+    body: i === 0
+      ? [{ number: 901, user: NIGHTLY, head: { sha: HEAD_A, ref: 'fix/issue-860-a' }, created_at: '2026-09-20T01:00:00Z' }, ...fills(i + 1)]
+      : fills(i + 1),
+    link: `<https://api.github.com/repos/${REPO}/pulls?state=open&per_page=30&page=${i + 2}>; rel="next"`,
+  }));
+  const { io, calls } = ioWith({
+    pullsPages,
+    checkRuns: { [HEAD_A]: [{ name: 'ci', status: 'completed', conclusion: 'success' }] },
+    commitDates: { [HEAD_A]: BEFORE_NIGHT },
+  });
+  const out = await runReport(io, ENV, { repo: REPO, night: '2026-09-26', dryRun: false });
+  assert.deepEqual(out.waitingOnYou.prs.map((w) => w.number), [901], 'the read PR is still listed');
+  assert.equal(out.waitingOnYou.idle, false, 'the page cap leaves the scan incomplete: no idle claim');
+  const created = calls.find((c) => c.method === 'POST' && c.path.endsWith('/issues'))!;
+  const body = String((created.body as { body: string }).body);
+  assert.ok(!body.includes('Idle night'));
+  const pullCalls = calls.filter((c) => c.method === 'GET' && c.path.startsWith(`/repos/${REPO}/pulls?state=open`));
+  assert.equal(pullCalls.length, 10, 'the scan stops at the cap');
 });
 
