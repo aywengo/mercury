@@ -44,6 +44,7 @@ Record: [`docs/host-installer.md`](docs/host-installer.md)
 | #1095 | e2e: fleetBots writes its Runs into the live host database (`MERCURY_DATA_DIR` is not a variable) | done | #1096 |
 | #1029 | release: the formula push to main is refused by the ruleset, so every release leaves Homebrew… | done | #1046 |
 | #1045 | release: a failed curl probe yields HTTP 000000 in the release notes (and the test stub hides it) | done | #1047 |
+| #1107 | CI: host-installer (container fedora:latest) fails — Fedora 45 image has no runuser/su | open | — |
 
 ## Nightly self-development
 
