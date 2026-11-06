@@ -73,6 +73,7 @@ Record: [`docs/nightly-self-development.md`](docs/nightly-self-development.md)
 | #1001 | nightly: a claim whose Run ended with no PR and no comment is never released; rung 2 claims work with no ready signal | done | #1009 |
 | #1086 | e2e: the harness never imports product code -- fleetBots.test.ts imports test/helpers.ts | untracked | — |
 | #1105 | nightly: the 00:00, 00:20 and e2e Runs die with "Connection error" before any output, two nights running | open | — |
+| #1111 | nightly: four Runs on #989 ended without finish/blocked and left nothing pushed | open | — |
 
 ## Dispatcher bots
 
