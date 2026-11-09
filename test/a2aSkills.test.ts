@@ -21,7 +21,8 @@ import {
   loadOneSkillById,
   withPlaceholderInput,
 } from '../src/a2a/skills.ts';
-import { validateCreateRequest } from '../src/domain/createRequest.ts';
+import { CREATE_REQUEST_FIELDS, validateCreateRequest } from '../src/domain/createRequest.ts';
+import { suggestionFor } from '../src/domain/suggestKey.ts';
 import { A2A_AGENT_CARD_PATH, A2A_PREFIX, A2A_SKILL_SELECTION_EXTENSION, type A2aConfig } from '../src/a2a/config.ts';
 import type { A2aExposedSkill } from '../src/a2a/config.ts';
 import { createApp } from '../src/api/server.ts';
@@ -193,10 +194,48 @@ test('one bad file is reported without stopping the others', () => {
   }
 });
 
+test('a huge unknown key is refused without an edit-distance walk (Copilot review of this PR)', () => {
+  // The API's body cap is 1 MiB, so an authenticated caller can carry a 500k-character
+  // unknown key. The did-you-mean helper must skip candidates farther apart than its
+  // suggestion threshold instead of building a full (key x candidate) edit-distance matrix
+  // per candidate: with every known key ~12 chars long, that table is 500k rows of 13
+  // allocated cells, per candidate, on the API's event loop, before the 400 goes out.
+  const key = 'x'.repeat(500_000);
+  const t0 = performance.now();
+  assert.equal(suggestionFor(key, CREATE_REQUEST_FIELDS), undefined);
+  assert.ok(performance.now() - t0 < 1000, 'suggestionFor must skip far candidates without allocating a matrix');
+  assert.throws(
+    () => validateCreateRequest({ [key]: 1, task: 'x' }),
+    (err: Error) =>
+      err.message.startsWith(`create request has unknown key "${key}"`)
+      && !err.message.includes('did you mean')
+      && err.message.includes('allowed keys: task, repository'),
+  );
+});
+
 test('no catalog is no finding: A2A stays off, validate exits clean', () => {
   const dir = tempDir('a2a-skills-');
   try {
     assert.deepEqual(loadExposedSkills(envFor(dir)), { skills: [], findings: [] });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a catalog path that is a file is a finding, not a silent empty catalog (Copilot review of this PR)', () => {
+  // ENOENT is "no catalog" (A2A stays off, not a finding). Any other read failure -- the
+  // path is a regular file (ENOTDIR) or unreadable (EACCES) -- is a misconfiguration that
+  // must be reported: swallowing it made `host a2a validate` exit 0 on a host whose skills
+  // path was a file, which the operator would read as "everything is valid".
+  const dir = tempDir('a2a-skills-');
+  try {
+    const skills = join(dir, 'mercury', 'a2a', 'skills');
+    mkdirSync(join(dir, 'mercury', 'a2a'), { recursive: true });
+    writeFileSync(skills, 'not a directory');
+    const load = loadExposedSkills(envFor(dir));
+    assert.deepEqual(load.skills, []);
+    assert.equal(load.findings.length, 1);
+    assert.match(load.findings[0]!, /cannot read skills directory/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -352,6 +391,33 @@ test('server-load admission: a skill that cannot create a valid Run is not expos
   } finally { env.close(); }
 });
 
+test('server-load admission: a template selection is forwarded and validated; null is refused (Copilot review of this PR)', () => {
+  // A template that names `selection` (a known create-request field) used to have it silently
+  // dropped -- the Run it created carried no selection_recorded, and even `selection: null`
+  // escaped admission because the field never reached the input. Forward it, so a record that
+  // cannot be trusted is refused at server load instead of lost at request time.
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const good = admitExposedSkills([
+      {
+        ...catalogSkill('sel-good'),
+        template: {
+          ...catalogSkill('sel-good').template,
+          selection: { via: 'laya', mode: 'shadow', reason: 'single_candidate', chosen: { agent: 'fake' } },
+        },
+      },
+    ], env.runService);
+    assert.deepEqual(good.skills.map((s) => s.id), ['sel-good']);
+    assert.deepEqual(good.findings, []);
+    const nullSel = admitExposedSkills([
+      { ...catalogSkill('sel-null'), template: { ...catalogSkill('sel-null').template, selection: null } },
+    ], env.runService);
+    assert.deepEqual(nullSel.skills, []);
+    assert.equal(nullSel.findings.length, 1);
+    assert.match(nullSel.findings[0]!, /^sel-null: selection must be an object/);
+  } finally { env.close(); }
+});
+
 test('server-load admission: a Run-creating surface that refuses the owner is noted, not hidden', () => {
   // admitCreateRequest is run with the skill's first owner; a credential-profile refusal is a
   // per-caller runtime outcome (that owner is refused any Run), so it is reported and the skill
@@ -417,6 +483,9 @@ test('SendMessage forwards every template field to the created Run', async () =>
         skills: ['testing'],
         constraints: { maxDurationMs: 30_000, maxRetries: 0 },
         model: 'm-template-test',
+        // The Laya selection record the operator pinned in the template (Copilot review of this
+        // PR): it must ride on the created Run, not be silently dropped at the create call.
+        selection: { via: 'laya', mode: 'shadow', reason: 'single_candidate', chosen: { agent: 'fake', model: 'm-template-test' } },
       },
     });
     const app = createApp({
@@ -453,6 +522,11 @@ test('SendMessage forwards every template field to the created Run', async () =>
       const events = (await evRes.json()) as { events: { type: string; payload?: Record<string, unknown> }[] };
       const selected = events.events.filter((e) => e.type === 'skill.selected');
       assert.deepEqual(selected.map((e) => (e.payload as { skill?: string })?.skill), ['testing']);
+      // The template's selection record is stored on the Run (it used to be dropped, so the Run
+      // had no selection_recorded event at all).
+      const recorded = events.events.filter((e) => e.type === 'run.selection_recorded');
+      assert.equal(recorded.length, 1);
+      assert.deepEqual((recorded[0]!.payload as { chosen?: unknown }).chosen, { agent: 'fake', model: 'm-template-test' });
     } finally { await srv.close(); stream.stop(); }
   } finally { env.close(); }
 });
@@ -480,6 +554,18 @@ test('host a2a validate: no catalog is clean (exit 0), a missing --skill file is
     const missing = await cli(['host', 'a2a', 'validate', '--skill', 'ghost'], envFor(dir));
     assert.equal(missing.code, 1);
     assert.match(missing.stdout, /skill ghost: cannot read/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('host a2a validate: an unreadable catalog path is a finding (exit 1), not "no skills found"', async () => {
+  const dir = tempDir('a2a-cli-');
+  try {
+    const skills = join(dir, 'mercury', 'a2a', 'skills');
+    mkdirSync(join(dir, 'mercury', 'a2a'), { recursive: true });
+    writeFileSync(skills, 'not a directory');
+    const res = await cli(['host', 'a2a', 'validate'], envFor(dir));
+    assert.equal(res.code, 1);
+    assert.match(res.stdout, /skill FAIL: .*cannot read skills directory/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 

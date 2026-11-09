@@ -66,6 +66,13 @@ export interface A2aExposedSkill {
     preset?: { id: string; version?: string };
     workflow?: { id: string; version?: string };
     model?: string;
+    /**
+     * The Laya selection record (#854), like any other create-request field. Not shape-checked
+     * by the pure validator (its `chosen` check runs against the RESOLVED agent/model, which
+     * only create() knows); server-load admission and the create call below forward it, so a
+     * record that cannot be trusted is refused there instead of silently dropped.
+     */
+    selection?: unknown;
   };
   /** Rejected above this many characters rather than truncated (section 6.7). */
   inputMaxChars?: number;

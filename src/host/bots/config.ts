@@ -362,51 +362,70 @@ export function validateBotTemplates(cfg: BotConfig, nowMs: number = Date.now())
   for (const task of cfg.tasks) {
     const field = `schedule.tasks[${task.name}].template`;
     const fire = next.get(task.name);
-    let body: Record<string, unknown>;
-    if (fire === undefined || Number.isNaN(fire.fireMs)) {
-      // The cron cannot fire within the 24h horizon: the placeholders and notAfterAt cannot be
-      // resolved at a real fire. Validate everything else, strip the bot helper, and say the
-      // deadline check did not run -- a schedule that never fires is a warning, not a refusal.
-      body = { ...task.template };
-      delete body.notAfterAt;
-      warnings.push(`${field}: no fire within 24h; notAfterAt not checked`);
-    } else {
-      // The same wall-minute derivation the dispatch loop uses (scheduler.ts): date and time
-      // are slices of the scheduled wall-minute id, in the task's zone.
-      const tzParts = {
-        date: fire.wallMinute.slice(1, 11),
-        time: fire.wallMinute.slice(12, 17),
-        iso: fire.wallMinute,
-      };
-      body = resolveTemplate(task, tzParts);
-    }
-    // The dispatch-time additions (scheduler.ts, section 4.3): the attribution hint and the
-    // constraint defaults the bot applies to EVERY dispatch. Validating the body the scheduler
-    // actually posts -- not the raw template -- is what makes the check measure a real fire.
-    const constraints = { ...((body.constraints as Record<string, unknown> | undefined) ?? {}) };
-    constraints.botTask = task.name;
-    if (constraints.maxDurationMs === undefined) constraints.maxDurationMs = 3_600_000;
-    if (constraints.maxRetries === undefined) constraints.maxRetries = 0;
-    body.constraints = constraints;
     try {
+      let body: Record<string, unknown>;
+      if (fire === undefined || Number.isNaN(fire.fireMs)) {
+        // The cron cannot fire within the 24h horizon: the placeholders and notAfterAt cannot be
+        // resolved at a real fire. Validate everything else, strip the bot helper, and say the
+        // deadline check did not run -- a schedule that never fires is a warning, not a refusal.
+        body = { ...task.template };
+        delete body.notAfterAt;
+        warnings.push(`${field}: no fire within 24h; notAfterAt not checked`);
+      } else {
+        // The same wall-minute derivation the dispatch loop uses (scheduler.ts): date and time
+        // are slices of the scheduled wall-minute id, in the task's zone. resolveTemplate can
+        // throw (notAfterAt must be 'HH:MM', which loadBotConfig does not know), and the
+        // dispatch loop records that per fire and keeps going -- a resolution failure is a
+        // task-qualified finding here, never an abort of the whole validate (Copilot review of
+        // this PR).
+        const tzParts = {
+          date: fire.wallMinute.slice(1, 11),
+          time: fire.wallMinute.slice(12, 17),
+          iso: fire.wallMinute,
+        };
+        body = resolveTemplate(task, tzParts);
+      }
+      // The dispatch-time additions (scheduler.ts, section 4.3): the attribution hint and the
+      // constraint defaults the bot applies to EVERY dispatch. Validating the body the scheduler
+      // actually posts -- not the raw template -- is what makes the check measure a real fire.
+      const constraints = { ...((body.constraints as Record<string, unknown> | undefined) ?? {}) };
+      constraints.botTask = task.name;
+      if (constraints.maxDurationMs === undefined) constraints.maxDurationMs = 3_600_000;
+      if (constraints.maxRetries === undefined) constraints.maxRetries = 0;
+      body.constraints = constraints;
+      // api.via: "fleet" (fleet-bots-design.md section 4): the fleet submit handler consumes
+      // the routing fields before dispatch and strips them from the child payload
+      // (fleet/server.ts), so they are NOT create-request fields -- validate them separately,
+      // then keep them out of the shared check. The host path posts the body as-is to
+      // /api/runs, where they remain unknown-key refusals.
+      if (cfg.api.via === 'fleet') {
+        if (body.host !== undefined && (typeof body.host !== 'string' || body.host.length === 0)) {
+          throw new Error('host must be a non-empty string when present (the fleet named-host pin, fleet-bots-design.md section 4)');
+        }
+        const labels = body.labels;
+        if (labels !== undefined && (labels === null || typeof labels !== 'object' || Array.isArray(labels)
+          || Object.values(labels as Record<string, unknown>).some((v) => typeof v !== 'string'))) {
+          throw new Error('labels must be an object of string values when present (the fleet pool filter, fleet-bots-design.md section 4)');
+        }
+        delete body.host;
+        delete body.labels;
+      }
       const stamped = findServerStampedField(body);
       if (stamped) throw new Error(serverStampedFieldMessage(stamped));
       validateCreateRequest(body, { requireRepository: true });
+      // The notAfter-in-the-future check above measures against NOW. A deadline that lies
+      // between now and the fire's own instant passes that check, yet 400s at every fire (the
+      // #785 class, one level down): a template whose deadline predates its first dispatch.
+      if (fire !== undefined && !Number.isNaN(fire.fireMs)) {
+        const na = constraints.notAfter;
+        if (typeof na === 'string' && !Number.isNaN(Date.parse(na)) && Date.parse(na) <= fire.fireMs) {
+          throw new Error(`notAfter ${na} is in the past at the task's fire time (fires at ${new Date(fire.fireMs).toISOString()}); the Run would be unstartable`);
+        }
+      }
+      ok.push(task.name);
     } catch (err) {
       findings.push(`${field}: ${(err as Error).message}`);
-      continue;
     }
-    // The notAfter-in-the-future check above measures against NOW. A deadline that lies between
-    // now and the fire's own instant passes that check, yet 400s at every fire (the #785 class,
-    // one level down): a template whose deadline predates its first dispatch.
-    if (fire !== undefined && !Number.isNaN(fire.fireMs)) {
-      const na = constraints.notAfter;
-      if (typeof na === 'string' && !Number.isNaN(Date.parse(na)) && Date.parse(na) <= fire.fireMs) {
-        findings.push(`${field}: notAfter ${na} is in the past at the task's fire time (fires at ${new Date(fire.fireMs).toISOString()}); the Run would be unstartable`);
-        continue;
-      }
-    }
-    ok.push(task.name);
   }
   return { ok, findings, warnings };
 }

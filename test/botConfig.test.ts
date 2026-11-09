@@ -369,17 +369,81 @@ test('a notAfter already in the past fails with the creation-time message', () =
 });
 
 test('a deadline between now and the fire\'s own instant fails: it would 400 on every fire', () => {
-  // A */20 cron fires within 20 minutes; a deadline one wall-clock minute from now is in the
-  // future (the shared validator passes it) yet before the first dispatch, where the server
-  // would refuse it. That is the #785 class one level down: a template that 400s on every fire.
-  const oneMinuteFromNow = new Date(Date.now() + 60_000);
-  const pad = (n: number): string => String(n).padStart(2, '0');
-  const notAfterAt = `${pad(oneMinuteFromNow.getUTCHours())}:${pad(oneMinuteFromNow.getUTCMinutes())}`;
-  const { env, cleanup } = withBots({ earlydeadline: templateBot({ task: 'do the thing', repository: { url: 'https://github.com/aywengo/mercury.git' }, notAfterAt }) });
+  // The deadline is the fire's OWN wall-clock minute: in the future at creation (the shared
+  // validator passes it) yet not after the first dispatch, where the server refuses a notAfter
+  // that predates the creation instant. That is the #785 class one level down: a template that
+  // 400s on every fire. The clock is simulated (midday) and the schedule fires daily at 04:00,
+  // so the next fire is a fixed ~16h ahead on the REAL calendar and the deadline's date cannot
+  // roll under the real clock: the old fixture derived notAfterAt from now+1min on a */20 cron,
+  // and in the day's last cron window (23:40-24:00) the fire's date rolled to the next day
+  // while the minute did not, so the check passed and the test failed (23:41 UTC).
+  const simulatedNow = new Date();
+  simulatedNow.setUTCHours(12, 0, 0, 0);
+  const { env, cleanup } = withBots({ earlydeadline: templateBot({ task: 'do the thing', repository: { url: 'https://github.com/aywengo/mercury.git' }, notAfterAt: '04:00' }, '0 4 * * *') });
   try {
-    const result = validateBotTemplates(loadBotConfig('earlydeadline', env));
+    const result = validateBotTemplates(loadBotConfig('earlydeadline', env), simulatedNow.getTime());
     assert.equal(result.ok.length, 0);
     assert.match(result.findings[0]!, /notAfter .+ is in the past at the task's fire time/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('a template that cannot be resolved is a finding, and later tasks are still checked (Copilot review of this PR)', () => {
+  // notAfterAt: 'tomorrow' passes loadBotConfig (the template is untyped) but resolveTemplate
+  // throws on its 'HH:MM' check. The scheduler records that failure per fire and keeps going,
+  // so validate must do the same: a task-qualified finding, never an abort that skips the
+  // remaining tasks and the command's own credential checks.
+  const cfg = {
+    schedule: {
+      tasks: [
+        { name: 'broken', cron: '*/20 * * * *', tz: 'UTC', singleFlight: true, onMiss: 'skip',
+          template: { task: 'do the thing', repository: { url: 'https://github.com/aywengo/mercury.git' }, notAfterAt: 'tomorrow' } },
+        { name: 'fine', cron: '*/20 * * * *', tz: 'UTC', singleFlight: true, onMiss: 'skip',
+          template: { task: 'do the other thing', repository: { url: 'https://github.com/aywengo/mercury.git' } } },
+      ],
+    },
+  };
+  const { env, cleanup } = withBots({ badresolve: cfg });
+  try {
+    const result = validateBotTemplates(loadBotConfig('badresolve', env));
+    assert.deepEqual(result.ok, ['fine']);
+    assert.equal(result.findings.length, 1);
+    assert.match(result.findings[0]!, /schedule\.tasks\[broken\]\.template: notAfterAt must be 'HH:MM', got 'tomorrow'/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('a fleet-via template may name the routing fields host and labels (Copilot review of this PR)', () => {
+  // api.via: "fleet" (fleet-bots-design.md section 4): the fleet submit handler consumes
+  // host/labels before dispatch and strips them from the child payload, so they are NOT
+  // create-request fields and must not fail the shared check. A malformed value is a finding,
+  // and on the host path the same fields remain unknown-key refusals.
+  const fleetBot = (template: Record<string, unknown>) => ({
+    api: { url: 'http://127.0.0.1:4100', via: 'fleet' },
+    schedule: { tasks: [{ name: 'the-task', cron: '*/20 * * * *', tz: 'UTC', singleFlight: true, onMiss: 'skip', template }] },
+  });
+  const { env, cleanup } = withBots({
+    fleetok: fleetBot({ task: 'do the thing', repository: { url: 'https://github.com/aywengo/mercury.git' }, host: 'worker-2', labels: { pool: 'gpu' } }),
+    fleethost: fleetBot({ task: 'do the thing', repository: { url: 'https://github.com/aywengo/mercury.git' }, host: 42 }),
+    fleetlabels: fleetBot({ task: 'do the thing', repository: { url: 'https://github.com/aywengo/mercury.git' }, labels: 'gpu' }),
+    hostpath: templateBot({ task: 'do the thing', repository: { url: 'https://github.com/aywengo/mercury.git' }, host: 'worker-2' }),
+  }, { json: { fleetok: { api: 'tapi-1', fleet: 'tfleet-1' }, fleethost: { api: 'tapi-2', fleet: 'tfleet-2' }, fleetlabels: { api: 'tapi-3', fleet: 'tfleet-3' } } });
+  try {
+    const ok = validateBotTemplates(loadBotConfig('fleetok', env));
+    assert.deepEqual(ok.findings, []);
+    assert.deepEqual(ok.ok, ['the-task']);
+    const host = validateBotTemplates(loadBotConfig('fleethost', env));
+    assert.equal(host.findings.length, 1);
+    assert.match(host.findings[0]!, /host must be a non-empty string when present/);
+    const labels = validateBotTemplates(loadBotConfig('fleetlabels', env));
+    assert.equal(labels.findings.length, 1);
+    assert.match(labels.findings[0]!, /labels must be an object of string values when present/);
+    // The host path posts the body as-is to /api/runs: the routing field is an unknown key there.
+    const hp = validateBotTemplates(loadBotConfig('hostpath', env));
+    assert.equal(hp.findings.length, 1);
+    assert.match(hp.findings[0]!, /unknown key "host"/);
   } finally {
     cleanup();
   }

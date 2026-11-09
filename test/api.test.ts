@@ -219,6 +219,47 @@ test('idempotency-key returns same run (#730, B0-2 contract)', async () => {
   }
 });
 
+test('idempotency replay answers the original Run even when the replay body has an invalid block (A0-5, #989)', async () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const { app, close: closeStream } = makeApi(env);
+    const srv = await listen(app);
+    try {
+      const base = `http://127.0.0.1:${srv.port}`;
+      const headers = { authorization: 'Bearer tok-alice', 'content-type': 'application/json', 'idempotency-key': 'k-blocks' };
+      const r1 = await fetch(`${base}/api/runs`, { method: 'POST', headers, body: JSON.stringify({ task: 'x', agent: 'fake' }) });
+      assert.equal(r1.status, 201);
+      const j1 = (await r1.json()) as { runId: string };
+      // A replay whose goal block is invalid: the replay check answers FIRST, so the original
+      // Run comes back and the replayed block is ignored -- the rule
+      // selection/goal/knowledge/preset/workflow always followed. A route-level FULL shape
+      // check would 400 this before the service could replay (Copilot review of this PR).
+      const r2 = await fetch(`${base}/api/runs`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ task: 'x', agent: 'fake', goal: 'bad' }),
+      });
+      assert.equal(r2.status, 201);
+      const j2 = (await r2.json()) as { runId: string };
+      assert.equal(j2.runId, j1.runId);
+      // A FRESH create with the same invalid block is still refused, with the block named.
+      const r3 = await fetch(`${base}/api/runs`, {
+        method: 'POST',
+        headers: { authorization: 'Bearer tok-alice', 'content-type': 'application/json' },
+        body: JSON.stringify({ task: 'x', agent: 'fake', goal: 'bad' }),
+      });
+      assert.equal(r3.status, 400);
+      const j3 = (await r3.json()) as { error: string };
+      assert.match(j3.error, /goal must be an object/);
+    } finally {
+      await srv.close();
+      closeStream();
+    }
+  } finally {
+    env.close();
+  }
+});
+
 test('idempotency-key absent -> every POST creates a Run (#730, B0-2 contract)', async () => {
   const env = makeEnv({ workerEnabled: false });
   try {

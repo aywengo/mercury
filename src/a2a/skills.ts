@@ -88,7 +88,15 @@ export function loadExposedSkills(env: NodeJS.ProcessEnv = process.env): Exposed
   let entries: string[];
   try {
     entries = readdirSync(dir).sort();
-  } catch {
+  } catch (err) {
+    // No directory is no catalog: A2A stays off (section 6.1), which is not a finding.
+    // Any OTHER read failure (the path is a regular file -- ENOTDIR -- or unreadable --
+    // EACCES) is a misconfiguration a validate run must report: swallowing it as an empty
+    // catalog made `host a2a validate` exit 0 on a host whose skills path is a file
+    // (Copilot review of this PR).
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+      return { skills: [], findings: [`${dir}: cannot read skills directory: ${(err as Error).message}`] };
+    }
     return { skills: [], findings: [] };
   }
   const skills: A2aExposedSkill[] = [];
@@ -248,6 +256,11 @@ export function admitExposedSkills(
       ...(t.preset !== undefined ? { preset: t.preset } : {}),
       ...(t.workflow !== undefined ? { workflow: t.workflow } : {}),
       ...(t.model !== undefined ? { model: t.model } : {}),
+      // Forwarded like the other template fields (Copilot review of this PR): a template
+      // selection record is validated by admitCreateRequest against the resolved agent/model
+      // and would otherwise be silently dropped -- or, as `selection: null`, escape the
+      // admission entirely because the field was never in the input.
+      ...(t.selection !== undefined ? { selection: t.selection } : {}),
     };
     try {
       runService.admitCreateRequest(input);

@@ -27,6 +27,13 @@ export function suggestionFor(key: string, known: readonly string[]): string | u
   let best: string | undefined;
   let bestDistance = Infinity;
   for (const candidate of known) {
+    // Levenshtein distance is at least the length difference, so a candidate farther apart
+    // than the suggestion threshold below can never be returned: skipping it avoids
+    // allocating the full (key x candidate) matrix for an unknown key far longer than any
+    // known key -- an authenticated body (1 MiB cap) with a 500k-character key would
+    // otherwise build a 500k-cell table per candidate on the API's event loop before the
+    // 400 goes out (Copilot review of this PR).
+    if (Math.abs(key.length - candidate.length) > Math.max(2, Math.floor(candidate.length / 4))) continue;
     const d = distance(key.toLowerCase(), candidate.toLowerCase());
     if (d < bestDistance) {
       bestDistance = d;

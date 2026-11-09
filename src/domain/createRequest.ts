@@ -1,12 +1,12 @@
 // The create-Run request validator (A0-5, issue #989).
 //
-// ONE validator, not two: `POST /api/runs`, the A2A exposed-skill catalog
-// (docs/a2a-design.md section 6.2) and the bot task templates (`host bot validate`,
-// dispatcher-bot-design.md section 12) all pass their create-request bodies through
-// `validateCreateRequest`, so the same invalid body is refused identically by every surface.
-// That is the general form of the #785 fix: night 1 of #742 dispatched 20 Runs that all failed
-// at workspace setup because a template had no `repository` and nothing checked templates
-// against the create model.
+// ONE validator, not two: `POST /api/runs` (its boundary half, `validateCreateRequestKeys`,
+// on the raw body), the A2A exposed-skill catalog (docs/a2a-design.md section 6.2) and the
+// bot task templates (`host bot validate`, dispatcher-bot-design.md section 12) all pass
+// their create-request bodies through `validateCreateRequest`, so the same invalid body is
+// refused identically by every surface. That is the general form of the #785 fix: night 1 of
+// #742 dispatched 20 Runs that all failed at workspace setup because a template had no
+// `repository` and nothing checked templates against the create model.
 //
 // Pure on purpose: no database, no registries, no capability probes. The checks that need
 // server state (the agent is registered, a named preset/workflow resolves, capability
@@ -272,9 +272,10 @@ export interface CreateRequestValidationOptions {
  * Validate a create-request body's shape -- the ONE validator for every surface (A0-5, #989).
  *
  * `RunService.create` runs it on the named caller-facing fields it receives, `POST /api/runs`
- * on the raw body, and the template validators on the resolved template, so an invalid body is
- * refused identically by the API and by `host a2a validate` (acceptance 2: one validator, not
- * two).
+ * runs its boundary half (`validateCreateRequestKeys`) on the raw body -- the block checks
+ * stay with the service so they run AFTER the idempotency-replay lookup -- and the template
+ * validators on the resolved template, so an invalid body is refused identically by the API
+ * and by `host a2a validate` (acceptance 2: one validator, not two).
  *
  * Throws a ValidationError naming the offending field on the first problem, in the order
  * `RunService.create` always checked them: the closed shape, then task, constraints, model,
@@ -290,10 +291,21 @@ export interface CreateRequestValidationOptions {
  * registered, preset/workflow resolvable, capabilities) -- those run in `RunService.create`,
  * unchanged.
  */
-export function validateCreateRequest(
-  request: unknown,
-  opts: CreateRequestValidationOptions = {},
-): void {
+/**
+ * The boundary half of the create-request check: the body is a JSON object and every key in it
+ * is a known create-request field.
+ *
+ * This is all `POST /api/runs` and the workflow route run on the RAW body -- and it is
+ * deliberate. The block checks of `validateCreateRequest` (goal, knowledge, preset, workflow,
+ * the repository shapes, ...) run in `RunService.create`'s admission, which runs them AFTER the
+ * idempotency-replay lookup: a replayed key returns the original Run and its original record,
+ * and the new body's blocks are ignored -- the rule selection/goal/knowledge/preset/workflow
+ * always followed. Running the full check at the route would 400 a replay before the service
+ * could answer it (Copilot review of this PR). The unknown-key refusal stays at the boundary,
+ * because a misspelled field is exactly what the service never sees (the route forwards named
+ * fields only) -- #785's failure mode at the body level.
+ */
+export function validateCreateRequestKeys(request: unknown): void {
   if (request === null || typeof request !== 'object' || Array.isArray(request)) {
     throw new ValidationError('create request must be a JSON object');
   }
@@ -306,6 +318,14 @@ export function validateCreateRequest(
       throw new ValidationError(unknownCreateRequestKeyMessage(key));
     }
   }
+}
+
+export function validateCreateRequest(
+  request: unknown,
+  opts: CreateRequestValidationOptions = {},
+): void {
+  validateCreateRequestKeys(request);
+  const r = request as Record<string, unknown>;
   // `task` is the one required field. The check is widened to non-strings, which used to
   // TypeError (and 500) at the HTTP boundary: `123` has no `.trim()`.
   const task = r.task;

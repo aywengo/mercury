@@ -413,6 +413,10 @@ export function buildRoutes(deps: FleetServerDeps): { routes: Route[]; prober: P
         if (!decision.repository) delete requested.repository;
         delete requested.host;
         delete requested.idempotency;
+        // The pool filter is consumed by the router above; the child create request has no
+        // labels key. Before #989 the child dropped it silently, and its closed-set check now
+        // turns the forward into an unknown-key 400 on every labelled submission.
+        delete requested.labels;
         const idem = typeof b.idempotency === 'string' && b.idempotency
           ? b.idempotency
           : headerIdempotency(ctx);
