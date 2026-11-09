@@ -544,8 +544,13 @@ mercury host a2a validate [--skill <id>]
 ```
 
 The checks that need server state (agent registered, preset/workflow
-resolvable) run at server load through the same code `RunService.create` uses;
-a skill failing either is not exposed and is reported (A1).
+resolvable, the capability matrices, the credential profile) run at server
+load, when the server mounts the A2A surface: each skill's template goes
+through the same creation admission `RunService.create` uses, with a
+placeholder input, and a skill that cannot create a valid Run is not exposed
+and is reported (a credential-profile refusal for one of the skill's owners
+is per-caller and noted, not hidden). If every skill is refused, the A2A
+surface is not mounted at all.
 
 ## Laya sidecar
 

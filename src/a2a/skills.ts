@@ -10,8 +10,9 @@
 // through the SAME validateCreateRequest POST /api/runs uses -- a skill that could not create a
 // valid Run never appears on a card (section 6.2; the general form of the #785 fix). The checks
 // that need server state (agent registered, preset/workflow resolvable) run at server load
-// through the same code create() uses (A1), never here: this module is offline on purpose, so
-// `host a2a validate` works on a host with no server and no database.
+// through the same admitCreateRequest create() uses (admitExposedSkills below, called by
+// createApp): this file's LOADERS stay offline on purpose, so `host a2a validate` works on a
+// host with no server and no database.
 
 import { readdirSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -22,6 +23,8 @@ import {
 } from '../domain/createRequest.ts';
 import { suggestionFor } from '../domain/suggestKey.ts';
 import { findServerStampedField, serverStampedFieldMessage } from '../api/serverStampedFields.ts';
+import { ForbiddenError } from '../domain/errors.ts';
+import type { CreateRunInput, RunService } from '../runs/runService.ts';
 import { BOT_ALIAS_RE } from '../host/bots/config.ts';
 import { BOT_OWNER_PREFIX, type A2aExposedSkill } from './config.ts';
 
@@ -194,4 +197,71 @@ function loadOneSkill(path: string, id: string): { skill: A2aExposedSkill } | st
       ...(file.inputMaxChars !== undefined ? { inputMaxChars: file.inputMaxChars as number } : {}),
     },
   };
+}
+
+// -- Server load (the other half of section 6.2) --
+
+export interface A2aSkillAdmission {
+  /** The skills that pass every check -- the A2A config the server exposes. */
+  skills: A2aExposedSkill[];
+  /** One line per refused or noted skill (`<id>: finding`). */
+  findings: string[];
+}
+
+/**
+ * The SERVER-LOAD half of section 6.2 (A0-5, #989): the checks the offline loader cannot run
+ * -- the agent is registered, a named preset/workflow resolves, the capability matrices, the
+ * credential profile -- run on every skill's template, with a placeholder input, through the
+ * SAME `RunService.admitCreateRequest` `create()` uses. A skill that cannot create a valid Run
+ * is not exposed and is reported; the caller of this function logs the findings.
+ *
+ * A credential-profile refusal is a per-caller runtime outcome (that owner is refused any Run
+ * they create, over the native API included), not a skill defect: it does not block exposure,
+ * it is reported so the operator sees which of the skill's owners cannot use it.
+ */
+export function admitExposedSkills(
+  skills: readonly A2aExposedSkill[],
+  runService: RunService,
+): A2aSkillAdmission {
+  const exposed: A2aExposedSkill[] = [];
+  const findings: string[] = [];
+  for (const skill of skills) {
+    if (skill.owners.length === 0) {
+      // The loader refuses an empty list; a programmatic config that skips it cannot invoke
+      // the skill with anyone, so it is not exposed rather than checked under a fake owner.
+      findings.push(`${skill.id}: owners is empty: no caller may invoke the skill`);
+      continue;
+    }
+    const t = skill.template;
+    const input: CreateRunInput = {
+      // The server-state checks are owner-independent except the profile, which is per-caller;
+      // the first owner is the representative the refusal report names.
+      ownerId: skill.owners[0]!,
+      task: withPlaceholderInput(t.task),
+      repository: t.repository,
+      ...(t.repositories !== undefined ? { repositories: t.repositories } : {}),
+      ...(t.agent !== undefined ? { agent: t.agent } : {}),
+      ...(t.skills !== undefined ? { skills: t.skills } : {}),
+      ...(t.constraints !== undefined ? { constraints: t.constraints } : {}),
+      ...(t.goal !== undefined ? { goal: t.goal } : {}),
+      ...(t.knowledge !== undefined ? { knowledge: t.knowledge } : {}),
+      ...(t.preset !== undefined ? { preset: t.preset } : {}),
+      ...(t.workflow !== undefined ? { workflow: t.workflow } : {}),
+      ...(t.model !== undefined ? { model: t.model } : {}),
+    };
+    try {
+      runService.admitCreateRequest(input);
+      exposed.push(skill);
+    } catch (err) {
+      if (err instanceof ForbiddenError) {
+        findings.push(
+          `${skill.id}: owner '${skill.owners[0]}' would be refused by a credential profile at create time: ${err.message}`,
+        );
+        exposed.push(skill);
+      } else {
+        findings.push(`${skill.id}: ${(err as Error).message}`);
+      }
+    }
+  }
+  return { skills: exposed, findings };
 }

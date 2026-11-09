@@ -8,20 +8,47 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Express } from 'express';
+import { execFile } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import {
   INPUT_MAX_CHARS_CEILING,
   INPUT_MAX_CHARS_DEFAULT,
+  admitExposedSkills,
   loadExposedSkills,
   loadOneSkillById,
   withPlaceholderInput,
 } from '../src/a2a/skills.ts';
 import { validateCreateRequest } from '../src/domain/createRequest.ts';
+import { A2A_AGENT_CARD_PATH, A2A_PREFIX, A2A_SKILL_SELECTION_EXTENSION, type A2aConfig } from '../src/a2a/config.ts';
+import type { A2aExposedSkill } from '../src/a2a/config.ts';
 import { createApp } from '../src/api/server.ts';
 import { EventStream } from '../src/events/eventStream.ts';
-import { makeEnv, tempDir } from './helpers.ts';
+import { makeEnv, makeGitRepo, tempDir } from './helpers.ts';
+
+const ROOT = fileURLToPath(new URL('..', import.meta.url));
+const V1 = { 'a2a-version': '1.0', 'a2a-extensions': A2A_SKILL_SELECTION_EXTENSION };
+
+/** Spawn the real CLI (offline host commands run before loadConfig: no DB, no server). */
+function cli(args: string[], env: NodeJS.ProcessEnv): Promise<{ code: number; stdout: string; stderr: string }> {
+  return new Promise((resolvePromise) => {
+    execFile(process.execPath, ['src/cli.ts', ...args], { cwd: ROOT, env, maxBuffer: 10 * 1024 * 1024 },
+      (err, stdout, stderr) => {
+        resolvePromise({ code: err ? (err as NodeJS.ErrnoException & { code?: number }).code ?? 1 : 0, stdout, stderr });
+      });
+  });
+}
+
+async function listen(app: Express): Promise<{ port: number; close: () => Promise<void> }> {
+  return new Promise((resolvePromise) => {
+    const server = app.listen(0, '127.0.0.1', () => {
+      const addr = server.address() as { port: number };
+      resolvePromise({ port: addr.port, close: () => new Promise<void>((res) => server.close(() => res())) });
+    });
+  });
+}
 
 /** A temp config home with one skill file written into it. */
 function writeSkillFile(dir: string, name: string, obj: unknown): void {
@@ -283,4 +310,211 @@ test('acceptance 2: the same invalid body is rejected identically by POST /api/r
     rmSync(dir, { recursive: true, force: true });
     env.close();
   }
+});
+
+
+// -- Server load (the other half of section 6.2, A0-5 #989) ------------------------------
+//
+// The checks the offline loader cannot run -- the agent is registered, a named preset/workflow
+// resolves, the capability matrices, the credential profile -- run at server load through the
+// same admitCreateRequest create() uses. A skill that cannot create a valid Run is not exposed
+// and is reported.
+
+function catalogSkill(id: string, over: Partial<A2aExposedSkill> = {}): A2aExposedSkill {
+  return {
+    id,
+    name: `Skill ${id}`,
+    description: 'A test skill.',
+    owners: ['alice'],
+    template: {
+      task: 'An external agent asked.\n---\n{{input}}',
+      repository: { localPath: '/srv/mercury' },
+      agent: 'fake',
+      constraints: { maxDurationMs: 30_000, maxRetries: 0 },
+    },
+    ...over,
+  };
+}
+
+test('server-load admission: a skill that cannot create a valid Run is not exposed and is reported', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const skills = [
+      catalogSkill('ok'),
+      { ...catalogSkill('badagent'), template: { ...catalogSkill('badagent').template, agent: 'no-such-agent' } },
+      { ...catalogSkill('badpreset'), template: { ...catalogSkill('badpreset').template, preset: { id: 'no-such-preset' } } },
+    ];
+    const { skills: exposed, findings } = admitExposedSkills(skills, env.runService);
+    assert.deepEqual(exposed.map((s) => s.id), ['ok']);
+    assert.equal(findings.length, 2);
+    assert.match(findings[0]!, /^badagent: Unknown agent: no-such-agent/);
+    assert.match(findings[1]!, /^badpreset: Preset not found: "no-such-preset"/);
+  } finally { env.close(); }
+});
+
+test('server-load admission: a Run-creating surface that refuses the owner is noted, not hidden', () => {
+  // admitCreateRequest is run with the skill's first owner; a credential-profile refusal is a
+  // per-caller runtime outcome (that owner is refused any Run), so it is reported and the skill
+  // stays exposed. makeEnv wires no profiles, so this pins the empty-owners guard instead.
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const { skills, findings } = admitExposedSkills([catalogSkill('nobody', { owners: [] })], env.runService);
+    assert.deepEqual(skills, []);
+    assert.equal(findings.length, 1);
+    assert.match(findings[0]!, /^nobody: owners is empty/);
+  } finally { env.close(); }
+});
+
+test('createApp drops skills that fail server-load admission and exposes the rest', async () => {
+  const env = makeEnv({ workerEnabled: false });
+  const repo = makeGitRepo(tempDir('a2a-wired-repo-'));
+  try {
+    const stream = new EventStream(env.db, env.events, 10);
+    stream.start();
+    const a2a: A2aConfig = {
+      enabled: true,
+      publicUrl: 'http://127.0.0.1:1',
+      skills: [
+        catalogSkill('good-skill', { template: { ...catalogSkill('good-skill').template, repository: { localPath: repo } } }),
+        catalogSkill('bad-skill', { template: { ...catalogSkill('bad-skill').template, agent: 'no-such-agent' } }),
+      ],
+    };
+    const app = createApp({
+      runService: env.runService,
+      events: env.events,
+      stream,
+      apiTokens: new Map([['tok-alice', 'alice']]),
+      adminToken: null,
+      a2a: { runService: env.runService, config: a2a, version: '0.0.0-test' },
+    });
+    const srv = await listen(app);
+    try {
+      const base = `http://127.0.0.1:${srv.port}`;
+      // The surface is still mounted: one skill survived, so the card exists.
+      const card = await fetch(`${base}${A2A_AGENT_CARD_PATH}`);
+      assert.equal(card.status, 200);
+      // The extended card lists exactly the surviving skill.
+      const extended = await fetch(`${base}${A2A_PREFIX}/extendedAgentCard`,
+        { headers: { authorization: 'Bearer tok-alice', ...V1 } });
+      assert.equal(extended.status, 200);
+      assert.deepEqual((await extended.json() as { skills: { id: string }[] }).skills.map((s) => s.id), ['good-skill']);
+    } finally { await srv.close(); stream.stop(); }
+  } finally { env.close(); }
+});
+
+test('SendMessage forwards every template field to the created Run', async () => {
+  const env = makeEnv({ workerEnabled: false });
+  const repo = makeGitRepo(tempDir('a2a-fwd-repo-'));
+  try {
+    const stream = new EventStream(env.db, env.events, 10);
+    stream.start();
+    const skill = catalogSkill('full-template', {
+      template: {
+        task: 'An external agent asked.\n---\n{{input}}',
+        repository: { localPath: repo },
+        repositories: [{ url: 'https://github.com/aywengo/extra.git' }],
+        agent: 'fake',
+        skills: ['testing'],
+        constraints: { maxDurationMs: 30_000, maxRetries: 0 },
+        model: 'm-template-test',
+      },
+    });
+    const app = createApp({
+      runService: env.runService,
+      events: env.events,
+      stream,
+      apiTokens: new Map([['tok-alice', 'alice']]),
+      adminToken: null,
+      a2a: { runService: env.runService, config: { enabled: true, publicUrl: 'http://127.0.0.1:1', skills: [skill] }, version: '0.0.0-test' },
+    });
+    const srv = await listen(app);
+    try {
+      const base = `http://127.0.0.1:${srv.port}`;
+      const res = await fetch(`${base}${A2A_PREFIX}/message:send`, {
+        method: 'POST',
+        headers: { authorization: 'Bearer tok-alice', 'content-type': 'application/json', ...V1 },
+        body: JSON.stringify({
+          message: { messageId: 'm-1', role: 'ROLE_USER', parts: [{ text: 'fix the flaky test' }], metadata: { skillId: 'full-template' } },
+          configuration: { returnImmediately: true },
+        }),
+      });
+      assert.equal(res.status, 200, `message:send: ${await res.text().catch(() => '')}`);
+      const listRes = await fetch(`${base}/api/runs`, { headers: { authorization: 'Bearer tok-alice' } });
+      const list = (await listRes.json()) as { runs: { id: string; model: string | null; repositories?: { url?: string }[]; task: string }[] };
+      assert.equal(list.runs.length, 1);
+      const run = list.runs[0]!;
+      // The model and the extra repository the template pinned are on the Run row.
+      assert.equal(run.model, 'm-template-test');
+      assert.deepEqual(run.repositories, [{ url: 'https://github.com/aywengo/extra.git' }]);
+      // The {{input}} slot was filled with the caller text.
+      assert.ok(run.task.includes('fix the flaky test'));
+      // The forwarded skills were recorded on the Run.
+      const evRes = await fetch(`${base}/api/runs/${run.id}/events`, { headers: { authorization: 'Bearer tok-alice' } });
+      const events = (await evRes.json()) as { events: { type: string; payload?: Record<string, unknown> }[] };
+      const selected = events.events.filter((e) => e.type === 'skill.selected');
+      assert.deepEqual(selected.map((e) => (e.payload as { skill?: string })?.skill), ['testing']);
+    } finally { await srv.close(); stream.stop(); }
+  } finally { env.close(); }
+});
+
+// -- The CLI (offline; exit codes are the contract) ----------------------------------------
+
+test('host a2a validate: exit 0 on a clean catalog, 1 with named findings', async () => {
+  const dir = tempDir('a2a-cli-');
+  try {
+    writeSkillFile(dir, 'good', validSkill());
+    writeSkillFile(dir, 'bad', validSkill({ constraints: { maxDurationMs: -1 } }));
+    const r = await cli(['host', 'a2a', 'validate'], envFor(dir));
+    assert.equal(r.code, 1);
+    assert.match(r.stdout, /skill ok: good/);
+    assert.match(r.stdout, /skill FAIL: bad: constraint maxDurationMs must be >= 0/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('host a2a validate: no catalog is clean (exit 0), a missing --skill file is a finding (exit 1)', async () => {
+  const dir = tempDir('a2a-cli-');
+  try {
+    const clean = await cli(['host', 'a2a', 'validate'], envFor(dir));
+    assert.equal(clean.code, 0);
+    assert.match(clean.stdout, /no skills found/);
+    const missing = await cli(['host', 'a2a', 'validate', '--skill', 'ghost'], envFor(dir));
+    assert.equal(missing.code, 1);
+    assert.match(missing.stdout, /skill ghost: cannot read/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('host bot validate: the shipped nightly example passes end to end (exit 0, template ok lines)', async () => {
+  const dir = tempDir('bot-cli-');
+  try {
+    const { mkdirSync: mkd, writeFileSync: wfs } = await import('node:fs');
+    mkd(join(dir, 'mercury', 'bots'), { recursive: true });
+    wfs(join(dir, 'mercury', 'bots', 'nightly.json'), readFileSync(join(ROOT, 'deploy', 'nightly-bot.json.example'), 'utf8'));
+    wfs(join(dir, 'mercury', 'bot-credentials.json'), JSON.stringify({ nightly: { api: 'tok-bot-nightly' } }), { mode: 0o600 });
+    wfs(join(dir, 'mercury', 'mercury.env'), 'MERCURY_API_TOKENS=tok-bot-nightly:bot-nightly\n', { mode: 0o600 });
+    const r = await cli(['host', 'bot', 'validate', '--alias', 'nightly'], envFor(dir));
+    assert.equal(r.code, 0, r.stdout + r.stderr);
+    assert.match(r.stdout, /config ok: /);
+    assert.match(r.stdout, /template ok: nightly-e2e/);
+    assert.match(r.stdout, /template ok: nightly-next/);
+    assert.match(r.stdout, /template ok: nightly-report/);
+    assert.match(r.stdout, /credentials ok/);
+    assert.match(r.stdout, /agreement ok/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('host bot validate: a template without a repository fails (exit 1, template FAIL line)', async () => {
+  const dir = tempDir('bot-cli-');
+  try {
+    const { mkdirSync: mkd, writeFileSync: wfs } = await import('node:fs');
+    mkd(join(dir, 'mercury', 'bots'), { recursive: true });
+    wfs(join(dir, 'mercury', 'bots', 'norepo.json'), JSON.stringify({
+      schedule: { tasks: [{ name: 'the-task', cron: '*/20 * * * *', tz: 'UTC', singleFlight: true, onMiss: 'skip', template: { task: 'do the thing' } }] },
+    }));
+    wfs(join(dir, 'mercury', 'bot-credentials.json'), JSON.stringify({ norepo: { api: 'tok-bot-norepo' } }), { mode: 0o600 });
+    wfs(join(dir, 'mercury', 'mercury.env'), 'MERCURY_API_TOKENS=tok-bot-norepo:bot-norepo\n', { mode: 0o600 });
+    const r = await cli(['host', 'bot', 'validate', '--alias', 'norepo'], envFor(dir));
+    assert.equal(r.code, 1, r.stdout + r.stderr);
+    assert.match(r.stdout, /template FAIL: schedule\.tasks\[the-task\]\.template: template must name a repository/);
+    assert.match(r.stdout, /credentials ok/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

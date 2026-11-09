@@ -12,6 +12,7 @@ import type { RunQueue } from '../queue/runQueue.ts';
 import type { RunService } from '../runs/runService.ts';
 import { createAuthMiddleware, requireAuth } from './auth.ts';
 import { a2aEnabled, type A2aDeps } from '../a2a/config.ts';
+import { admitExposedSkills } from '../a2a/skills.ts';
 import { mountA2a } from '../a2a/router.ts';
 import { createRoutes, sendError } from './routes.ts';
 import { createWorkflowRoutes } from './workflowRoutes.ts';
@@ -281,9 +282,21 @@ export function createApp(deps: ServerDeps): Express {
   // nor an agent card. The card is the one unauthenticated read; every A2A route is behind the same
   // gate /api uses.
   if (deps.a2a && a2aEnabled(deps.a2a.config)) {
+    // Server-load admission (A0-5, #989): the checks the offline catalog loader cannot run --
+    // the agent is registered, a named preset/workflow resolves, the capability matrices, the
+    // credential profile -- run through the same admitCreateRequest create() uses. A skill that
+    // cannot create a valid Run is not exposed and is reported; the findings are logged here,
+    // at the only point this server loads the catalog.
+    const admitted = admitExposedSkills(deps.a2a.config.skills, deps.runService);
+    for (const finding of admitted.findings) {
+      deps.logger?.warn({ surface: 'a2a' }, `a2a skill: ${finding}`);
+    }
+    const a2a = { ...deps.a2a, config: { ...deps.a2a.config, skills: admitted.skills } };
     // The SAME limiter instance as POST /api/runs: A2A's SendMessage creates Runs in the same queue,
     // so it draws on the same per-owner+IP budget instead of a second one of its own.
-    mountA2a(app, deps.a2a, { createRunLimiter });
+    // All rejected means a2aEnabled is false again: a card with no skills is not a smaller A2A
+    // server (section 6.1), so nothing is mounted.
+    if (a2aEnabled(a2a.config)) mountA2a(app, a2a, { createRunLimiter });
   }
 
   // Last-resort handler for anything that escaped a route (including middleware and body-parser
