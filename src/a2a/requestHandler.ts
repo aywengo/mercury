@@ -88,9 +88,19 @@ export function createA2aRequestHandler(deps: A2aDeps): A2ARequestHandler {
         // agent mangled -- and this is a coding agent, where a `$&` in a regex or a `$$` in a shell
         // snippet is ordinary. The function returns the text literally.
         task: skill.template.task.replace('{{input}}', () => text),
+        // The template IS a create-request body (A0-5, #989): every field the catalog validator
+        // admitted is forwarded, so the Run does exactly what the operator declared.
         repository: skill.template.repository,
+        repositories: skill.template.repositories,
         agent: skill.template.agent,
+        skills: skill.template.skills,
         constraints: skill.template.constraints,
+        goal: skill.template.goal,
+        knowledge: skill.template.knowledge,
+        preset: skill.template.preset,
+        workflow: skill.template.workflow,
+        model: skill.template.model,
+        selection: skill.template.selection,
         // The server's own provenance stamp (section 6.4, #988): no request body can set it, and
         // it is what makes ListTasks "this caller's A2A chains" rather than "every Run it owns".
         origin: { kind: 'a2a', ref: skill.id },

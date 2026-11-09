@@ -142,6 +142,26 @@ export async function submitRun(deps: DispatchDeps, input: SubmitInput): Promise
 }
 
 /**
+ * The routing fields Fleet consumes before dispatch: `host` (the router's placement),
+ * `idempotency` (the client token, scoped to the caller's owner) and `labels` (the pool
+ * filter). The child's create request has none of them -- before #989 the child dropped them
+ * silently, and its closed-key check now refuses a forwarded one as an unknown key.
+ *
+ * The ONE place they are stripped. It must apply to both callers of `deps.child.createRun`:
+ * the submission path (fleet/server.ts) and `recoverPending`, which re-sends the STORED
+ * `binding.requested` -- and a binding written before this change may still carry the fields,
+ * which would discard it at recovery even though the original submission created its Run
+ * (#989 round 2: recovery must not orphan pre-upgrade labelled bindings).
+ */
+export function stripChildRoutingFields(requested: Record<string, unknown>): Record<string, unknown> {
+  const child: Record<string, unknown> = { ...requested };
+  delete child.host;
+  delete child.idempotency;
+  delete child.labels;
+  return child;
+}
+
+/**
  * Crash recovery: re-derive every binding whose child answer was never recorded.
  *
  * Re-sends the stored payload with the SAME idempotency key. If the original request reached the child, the
@@ -160,7 +180,9 @@ export async function recoverPending(deps: DispatchDeps): Promise<{ resolved: nu
       // exactly the orphaning this function exists to prevent.
       continue;
     }
-    const result = await deps.child.createRun(host, binding.requested, binding.fleetRunId);
+    // Re-sent STRIPPED, not as stored: a pre-upgrade binding's `requested` may still carry
+    // the routing fields, which the child's closed-key check now refuses (#989 round 2).
+    const result = await deps.child.createRun(host, stripChildRoutingFields(binding.requested), binding.fleetRunId);
     if (result.kind === 'ok') {
       deps.bindings.bind(binding.fleetRunId, result.value.runId);
       deps.bindings.recordState({

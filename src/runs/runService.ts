@@ -11,12 +11,12 @@ import { ConflictError, ForbiddenError, NotFoundError, ValidationError, isClassi
 import type { Redactor } from '../domain/redact.ts';
 import type { AgentCapabilitySummary, GoalState, GoalStatus, GoalSummary, RepositoryContext, ResolvedSkill, Run, RunConstraints, RunOrigin, RunOriginKind, RunStatus } from '../domain/types.ts';
 import { goalCapabilityMessage, goalFieldCapabilityMessage } from '../domain/goalSupport.ts';
-import { GoalValidationError, resolveGoalSpec } from '../domain/goalSpec.ts';
+import { resolveGoalSpec } from '../domain/goalSpec.ts';
 import type { GoalStore } from './goalStore.ts';
 import { EventStore } from '../events/eventStore.ts';
 import type { SkillRegistry } from '../skills/skillRegistry.ts';
 import type { SkillSelector } from '../skills/skillSelector.ts';
-import { parseByteLimit, parseCpuLimit } from '../sandbox/resourceLimits.ts';
+import { validateConstraints, validateCreateRequest } from '../domain/createRequest.ts';
 import { RunStore, newRunId } from './runStore.ts';
 import { PresetStore, type RunPresetRow } from './presetStore.ts';
 import { WorkflowStore, type RunWorkflowRow } from './workflowStore.ts';
@@ -31,7 +31,7 @@ import { resolveWorkflowStages, WorkflowPresetResolutionError } from '../workflo
 import { renderPlan } from '../workflows/renderPlan.ts';
 import type { ResolvedWorkflow } from './workflowStore.ts';
 import { selectPack, type PackSelection } from '../knowledge/pack.ts';
-import { KnowledgeRequestError, knowledgeCapabilityMessage, parseKnowledgeRequest } from '../knowledge/request.ts';
+import { knowledgeCapabilityMessage, parseKnowledgeRequest } from '../knowledge/request.ts';
 import type { KnowledgeRequest } from '../knowledge/types.ts';
 import { resolveProfile, type CredentialProfiles } from '../host/credentials-profiles.ts';
 
@@ -398,6 +398,48 @@ export function validateSelection(
   return s;
 }
 
+/**
+ * The workflow template resolution as create() carries it (docs/crew/workflows.md section 3.1.1,
+ * #809). Hoisted out of create() so `CreateAdmission` can name it (A0-5, #989).
+ */
+type ResolvedWorkflowAdmission = {
+  /** The workflow resolution's effective agent (section 3.1.1 rules 1-2) -- the agent and
+   * model the Run row must carry (#842 review r2: discarding these ran a template whose
+   * stage required `hermes` on the system default agent instead). */
+  effectiveAgent: { id: string; model?: string };
+  snapshot: ResolvedWorkflow;
+  /** Each referenced stage preset's snapshot (section 3.1.1 rule 6), in stage order. */
+  stagePresets: { stageIndex: number; presetId: string; snapshot: ResolvedRolePreset }[];
+  /** Stage index -> that stage preset's instruction text, for the plan renderer. */
+  stageInstructions: Record<number, string>;
+  skills: ResolvedSkill[];
+  constraints: RunConstraints;
+};
+
+/**
+ * What `admitCreateRequest` returns when it does not replay: everything the creation
+ * transaction in `create()` consumes (A0-5, #989).
+ */
+export interface CreateAdmission {
+  safeTask: string;
+  safeRepository: RepositoryContext;
+  safeRepositories: RepositoryContext[] | undefined;
+  repository: RepositoryContext;
+  repositories: RepositoryContext[] | undefined;
+  agent: string;
+  model: string | undefined;
+  constraints: RunConstraints;
+  credentialProfile: string | null;
+  resolved: ResolvedSkill[];
+  presetSnapshot: ResolvedRolePreset | null;
+  resolvedWorkflow: ResolvedWorkflowAdmission | null;
+  selection: Record<string, unknown> | undefined;
+  goalState: GoalState | null;
+  wantsPack: boolean;
+  knowledgeDeps: KnowledgeSelectionDeps | undefined;
+  knowledgeRequest: KnowledgeRequest | null;
+}
+
 export class RunService {
   private deps: RunServiceDeps;
 
@@ -531,664 +573,16 @@ export class RunService {
   }
 
   create(input: CreateRunInput): Run {
-    if (!input.task || input.task.trim().length === 0) {
-      throw new ValidationError('task is required');
-    }
-    if (input.constraints) validateConstraints(input.constraints);
-    // Per-Run model shape validation (#823). It reaches argv/config in the adapters (P1-2/P1-3),
-    // so it must be a single shell-safe token: no whitespace or control characters, bounded
-    // length. An empty string is 'no model' vs an invalid value — refused rather than silently
-    // dropped, because a dropped override silently executes with the wrong model.
-    if (input.model !== undefined) {
-      validateModelShape(input.model, 'model');
-    }
-    // Internal-only, so this is a fail-closed guard rather than a caller-facing rule (the same
-    // spirit as RunStore.transition refusing a caller-supplied statusChangedAt): a malformed link
-    // would silently corrupt the chain -- an attempt that disagrees with its parent, or a retry
-    // with no parent at all -- and nothing downstream could tell.
-    if (input.retryLink !== undefined) {
-      const { retryOf, attempt } = input.retryLink;
-      if (typeof retryOf !== 'string' || retryOf.length === 0 || !Number.isInteger(attempt) || attempt < 2) {
-        throw new ValidationError('retryLink requires a parent run id and an attempt of at least 2');
-      }
-      if (this.deps.runs.get(retryOf) === null) {
-        throw new ValidationError(`retryLink names a parent that does not exist: ${retryOf}`);
-      }
-    }
-    if (input.idempotencyKey) {
-      const existing = this.findByIdempotencyKey(input.ownerId, input.idempotencyKey);
-      if (existing) return existing;
-    }
+    const admission = this.admitCreateRequest(input);
+    if ('replayed' in admission) return admission.replayed;
+    // The transaction below is written against these names; the destructure keeps it
+    // byte-identical to the pre-extraction code (A0-5, #989).
+    const {
+      safeTask, safeRepository, safeRepositories, repository, repositories, agent, model,
+      constraints, credentialProfile, resolved, presetSnapshot, resolvedWorkflow, selection,
+      goalState, wantsPack, knowledgeDeps, knowledgeRequest,
+    } = admission;
 
-    // Preset resolution (section 5): BEFORE agent/skills/constraints so the preset acts as
-    // defaults the caller can override (and required fields the caller cannot). A retry that
-    // carries presetSnapshot skips resolution entirely -- same bytes as the parent, exactly
-    // like skillSnapshots.
-    let presetSnapshot: ResolvedRolePreset | null = input.presetSnapshot ?? null;
-    // `undefined` is the only omitted value (#859 r2): `input.preset &&` let explicit falsy
-    // blocks (`preset: null`, "" or 0) slip past the closed-shape check as preset-less Runs,
-    // leaving the documented "preset must be an object" contract open and the null branch in
-    // it dead. Match `selection` (#865) and `workflow`: presence is checked, then shape.
-    if (input.preset !== undefined && !presetSnapshot) {
-      // Closed shape (#859): a retry never re-reads the caller's preset block (it uses
-      // presetSnapshot, same bytes as the parent), so this validation only guards the
-      // creation path that actually consumes the block.
-      if (input.preset === null || typeof input.preset !== 'object' || Array.isArray(input.preset)) {
-        throw new ValidationError('preset must be an object with an id');
-      }
-      // An unknown key is refused, never ignored. A typo such as `versoin` would otherwise
-      // drop the version pin silently and resolve the current preset -- the exact downgrade
-      // the pin exists to catch (the same closed-shape rule as the workflow block, #842 r4).
-      for (const key of Object.keys(input.preset)) {
-        if (key !== 'id' && key !== 'version') {
-          const hint = /^v/i.test(key) ? " (did you mean 'version'?)" : /^i/i.test(key) ? " (did you mean 'id'?)" : '';
-          throw new ValidationError(`preset has unknown key ${JSON.stringify(key)}${hint}; allowed keys: id, version`);
-        }
-      }
-      const presetBlock = input.preset as { id?: unknown; version?: unknown };
-      if (typeof presetBlock.id !== 'string' || presetBlock.id.length === 0) {
-        throw new ValidationError('preset.id must be a non-empty string');
-      }
-      if (presetBlock.version !== undefined && (typeof presetBlock.version !== 'string' || presetBlock.version.length === 0)) {
-        throw new ValidationError('preset.version must be a non-empty string when given');
-      }
-      if (!this.deps.presets) {
-        throw new ValidationError('presets are not enabled on this server; remove the preset block');
-      }
-      const loaded = this.deps.presets.get(input.preset.id);
-      if (input.preset.version && loaded.version !== input.preset.version) {
-        throw new ValidationError(
-          `preset ${JSON.stringify(input.preset.id)} is version ${loaded.version}, not the requested ${input.preset.version}`,
-        );
-      }
-      if (!loaded.enabled) {
-        throw new ValidationError(`preset ${JSON.stringify(loaded.id)} is disabled`);
-      }
-      const stat = this.deps.agentCapabilities?.();
-      const selection = resolvePreset(
-        loaded.manifest,
-        {
-          agent: input.agent,
-          // Caller surface exists now (#823): the caller's model wins unless the preset requires
-          // its own (modelRequired conflict stays enforced inside resolvePreset).
-          model: input.model,
-          skills: input.skills,
-          constraints: input.constraints,
-        } satisfies PresetCallerInput,
-        {
-          defaultAgent: this.deps.defaultAgent,
-          defaultMaxDurationMs: this.deps.defaultMaxDurationMs,
-          defaultMaxRetries: this.deps.defaultMaxRetries,
-        },
-        {
-          knownAgents: this.deps.knownAgents,
-          staticCapabilities: (agentId) => stat?.[agentId]?.static,
-        },
-      );
-
-      // Skills: auto-selection (section 3.2 step 2) needs the task text and the available
-      // list, so the selector runs here, not inside resolvePreset -- which flags the case
-      // (empty start list, autoSelect not disabled). A nativeNames backend with
-      // preset skills is a guaranteed fatal exit (issue #507's lesson), so preset skills fail
-      // closed for one instead of being silently recorded.
-      let skillIds = selection.effectiveSkillIds;
-      if (selection.autoSelect) {
-        const skillDelivery = this.deps.agentCapabilities?.()[selection.effectiveAgent.id]?.static?.skills;
-        if (skillDelivery !== 'nativeNames') {
-          // Section 3.2 as amended by #724: the selector runs whenever the start list is empty,
-          // and the preset's required skills are appended AFTER its picks (steps 3-4). The
-          // selector's budget shrinks by the DISTINCT required count so the merged, deduplicated
-          // list still fits the effective maximum without dropping a required skill -- required
-          // skills are "always present" by definition.
-          // Validation caps DISTINCT ids, so dedupe before the budget math: duplicates in the
-          // required list would otherwise shrink the selector's budget more than the final
-          // deduped list needs.
-          const required: string[] = [];
-          const seenRequired = new Set<string>();
-          for (const id of selection.effectiveSkillIds) {
-            if (seenRequired.has(id)) continue;
-            seenRequired.add(id);
-            required.push(id);
-          }
-          const cap = selection.skillCap;
-          const picks = this.deps.selector.select(
-            input.task,
-            this.deps.skills.list(),
-            Math.max(0, cap - required.length),
-          );
-          const seen = new Set<string>();
-          skillIds = [];
-          for (const id of [...picks, ...required]) {
-            if (seen.has(id)) continue;
-            seen.add(id);
-            skillIds.push(id);
-          }
-          // Step 5, enforced on the final merged list rather than assumed from the budget: a
-          // selector that ignores its budget or an over-cap required set fails the Run at
-          // creation with the same message resolveSkillIds uses for the named path.
-          if (skillIds.length > cap) {
-            throw new ValidationError(
-              `preset resolves to ${skillIds.length} skills; the effective maximum is ${cap}`,
-            );
-          }
-        }
-      }
-      if (skillIds.length > 0
-        && this.deps.agentCapabilities?.()[selection.effectiveAgent.id]?.static?.skills === 'nativeNames') {
-        throw new ValidationError(
-          `preset ${JSON.stringify(loaded.id)} names skills, but agent ${JSON.stringify(selection.effectiveAgent.id)}`
-          + ' resolves skill names in its own store; a missing one is a fatal exit. Run this preset'
-          + ' on an agent that reads workspace skills.',
-        );
-      }
-      const resolvedSkills = this.deps.skills.resolve(skillIds);
-      presetSnapshot = {
-        schemaVersion: 1,
-        id: loaded.id,
-        version: loaded.version,
-        role: loaded.role,
-        description: loaded.description,
-        trust: loaded.trust,
-        instruction: loaded.instruction,
-        effectiveAgent: selection.effectiveAgent,
-        effectiveSkills: resolvedSkills,
-        effectiveConstraints: selection.effectiveConstraints,
-        source: { kind: loaded.source.kind, relativePath: loaded.source.relativePath },
-        files: loaded.files,
-        contentHash: loaded.contentHash,
-      };
-    }
-
-    // Advisory Workflow Template resolution (docs/crew/workflows.md section 3.1, issue #809).
-    // BEFORE skills/constraints like the preset block: the stage presets act as demands the
-    // caller cannot ignore and ceilings the caller cannot widen (section 3.1.1). Fail-closed
-    // like every other admission block: a template or preset reference that cannot resolve is
-    // a refused creation, never a Run that silently runs without its plan.
-    let resolvedWorkflow: {
-      /** The workflow resolution's effective agent (section 3.1.1 rules 1-2) -- the agent and
-       * model the Run row must carry (#842 review r2: discarding these ran a template whose
-       * stage required `hermes` on the system default agent instead). */
-      effectiveAgent: { id: string; model?: string };
-      snapshot: ResolvedWorkflow;
-      /** Each referenced stage preset's snapshot (section 3.1.1 rule 6), in stage order. */
-      stagePresets: { stageIndex: number; presetId: string; snapshot: ResolvedRolePreset }[];
-      /** Stage index -> that stage preset's instruction text, for the plan renderer. */
-      stageInstructions: Record<number, string>;
-      skills: import('../domain/types.ts').ResolvedSkill[];
-      constraints: RunConstraints;
-    } | null = null;
-    if (input.workflowSnapshot !== undefined) {
-      // Internal retry path (#842 review): the parent's stored snapshot rows, verbatim. No
-      // registry read at all -- the template may have been deleted or rewritten since the
-      // parent ran, and the retry must execute the parent's bytes, not a re-resolution. The
-      // Run row's constraints ARE the parent's effective set (retry copies original.constraints),
-      // which is exactly the set resolution would have produced.
-      const wfSnap = input.workflowSnapshot.workflow;
-      if (input.workflow !== undefined) {
-        throw new ValidationError('workflow and workflowSnapshot are mutually exclusive');
-      }
-      resolvedWorkflow = {
-        // Retry passes the parent's agent/model explicitly, so this is not consulted -- the
-        // parent's values are the resolution's output, already persisted on its Run row.
-        effectiveAgent: { id: input.agent ?? this.deps.defaultAgent },
-        snapshot: wfSnap,
-        stagePresets: input.workflowSnapshot.stagePresets.map((sp) => ({
-          stageIndex: sp.stageIndex,
-          presetId: sp.snapshot.id,
-          snapshot: sp.snapshot,
-        })),
-        stageInstructions: Object.fromEntries(
-          input.workflowSnapshot.stagePresets.map((sp) => [sp.stageIndex, sp.snapshot.instruction]),
-        ),
-        skills: input.workflowSnapshot.skills,
-        constraints: {
-          maxDurationMs: input.constraints?.maxDurationMs ?? this.deps.defaultMaxDurationMs,
-          maxRetries: input.constraints?.maxRetries ?? this.deps.defaultMaxRetries,
-          notAfter: input.constraints?.notAfter,
-          botTask: input.constraints?.botTask,
-          budgetTokens: input.constraints?.budgetTokens,
-          budgetCost: input.constraints?.budgetCost,
-          resourceLimits: input.constraints?.resourceLimits,
-          allowedNetworks: input.constraints?.allowedNetworks,
-        },
-      };
-    } else if (input.workflow !== undefined) {
-      if (input.workflow === null || typeof input.workflow !== 'object' || Array.isArray(input.workflow)) {
-        throw new ValidationError('workflow must be an object with an id');
-      }
-      // Closed shape (#842 review r4): an unknown key is refused, never ignored. A typo such as
-      // `versoin` would otherwise drop the version pin silently and run the current template --
-      // the exact downgrade the pin exists to catch.
-      for (const key of Object.keys(input.workflow as object)) {
-        if (key !== 'id' && key !== 'version') {
-          const hint = /^v/i.test(key) ? " (did you mean 'version'?)" : /^i/i.test(key) ? " (did you mean 'id'?)" : '';
-          throw new ValidationError(`workflow has unknown key ${JSON.stringify(key)}${hint}; allowed keys: id, version`);
-        }
-      }
-      const wf = input.workflow as { id?: unknown; version?: unknown };
-      if (typeof wf.id !== 'string' || wf.id.length === 0) {
-        throw new ValidationError('workflow.id must be a non-empty string');
-      }
-      if (wf.version !== undefined && (typeof wf.version !== 'string' || wf.version.length === 0)) {
-        throw new ValidationError('workflow.version must be a non-empty string when given');
-      }
-      if (input.preset !== undefined) {
-        throw new ValidationError(
-          'preset and workflow are mutually exclusive: an advisory workflow renders per-stage'
-          + ' preset guidance for its own steps, so a Run-wide preset has no place in it',
-        );
-      }
-      if (!this.deps.workflows) {
-        throw new ValidationError('workflows are not enabled on this server; remove the workflow block');
-      }
-      // Version pin = optimistic guard, the same rule the preset block applies: a pinned
-      // version that does not resolve is refused rather than silently re-resolved.
-      let loaded: LoadedWorkflow;
-      try {
-        loaded = this.deps.workflows.get(wf.id);
-      } catch (err) {
-        if (err instanceof NotFoundError) {
-          // Unknown template -> the W-1 code vocabulary (issue #809 acceptance 5): the
-          // registry's NotFoundError becomes a validation error carrying the code, so service
-          // callers branch on codes, not prose. An INVALID template is not rewritten: its
-          // WorkflowValidationFailure already carries the W-1 findings.
-          throw new WorkflowPresetResolutionError('WORKFLOW_NOT_FOUND', 'workflow.id',
-            `workflow ${JSON.stringify(wf.id)} does not resolve in the workflow registry`);
-        }
-        throw err;
-      }
-      if (wf.version !== undefined && loaded.version !== wf.version) {
-        throw new ValidationError(
-          `workflow ${JSON.stringify(loaded.id)} is version ${loaded.version}, not the requested ${wf.version}`,
-        );
-      }
-      if (!this.deps.presets) {
-        throw new ValidationError(
-          'workflows resolve stage presets, so presets must be enabled on this server',
-        );
-      }
-      const stageSelection = resolveWorkflowStages(
-        loaded,
-        {
-          agent: input.agent,
-          model: input.model,
-          skills: input.skills,
-          constraints: input.constraints,
-        },
-        {
-          defaultAgent: this.deps.defaultAgent,
-          defaultMaxDurationMs: this.deps.defaultMaxDurationMs,
-          defaultMaxRetries: this.deps.defaultMaxRetries,
-        },
-        {
-          knownAgents: this.deps.knownAgents,
-          staticCapabilities: (agentId) => this.deps.agentCapabilities?.()[agentId]?.static,
-        },
-        (id) => this.deps.presets!.get(id),
-      );
-      // Skill resolution (section 3.1.1 rule 4, deferring to role-presets section 3.2): the
-      // caller's list when PROVIDED (an explicit [] means "no skills" and suppresses
-      // auto-selection), otherwise the per-stage selector picks; then the union of the stages'
-      // REQUIRED skills appended, deduped by first occurrence; then the strictest stage's cap.
-      // Exceeding it FAILS -- nothing is dropped (#842 review r5: caller skills were discarded).
-      const skillCap = stageSelection.skillCap;
-      const requiredSkills = stageSelection.requiredSkillIds;
-      const skillIds: string[] = [];
-      const seenSkill = new Set<string>();
-      const pushSkill = (id: string): void => {
-        if (seenSkill.has(id)) return;
-        seenSkill.add(id);
-        skillIds.push(id);
-      };
-      if (input.skills !== undefined) {
-        for (const id of input.skills) pushSkill(id);
-      } else {
-        for (const stage of stageSelection.autoSelectStages) {
-          const preset = stageSelection.stagePresets.find((s) => s.stageIndex === stage.stageIndex)?.preset;
-          if (!preset) continue;
-          const skillDeliveryForStage = this.deps.agentCapabilities?.()[stageSelection.effectiveAgent.id]?.static?.skills;
-          if (skillDeliveryForStage === 'nativeNames') continue; // guarded again below, on the merged list
-          const picks = this.deps.selector.select(
-            // The stage's own task: selection guidance is per step, never the whole plan.
-            loaded.stages[stage.stageIndex]?.task ?? input.task,
-            this.deps.skills.list(),
-            // Budget = cap - required (decision 2A): the required skills are appended after.
-            Math.max(0, skillCap - requiredSkills.length - skillIds.length),
-          );
-          for (const id of picks) pushSkill(id);
-        }
-      }
-      for (const id of requiredSkills) pushSkill(id);
-      if (skillIds.length > skillCap) {
-        throw new ValidationError(
-          `workflow ${JSON.stringify(loaded.id)} resolves to ${skillIds.length} skills (caller list plus`
-          + ` stage-required skills); the effective maximum is ${skillCap}, the strictest stage's cap`,
-        );
-      }
-      if (skillIds.length > 0
-        && this.deps.agentCapabilities?.()[stageSelection.effectiveAgent.id]?.static?.skills === 'nativeNames') {
-        throw new ValidationError(
-          `workflow ${JSON.stringify(loaded.id)} resolves skills, but agent`
-          + ` ${JSON.stringify(stageSelection.effectiveAgent.id)} resolves skill names in its own`
-          + ' store; a missing one is a fatal exit. Run this workflow on an agent that reads'
-          + ' workspace skills.',
-        );
-      }
-      const resolvedWorkflowSkills = this.deps.skills.resolve(skillIds);
-      // Stage preset instructions ride the SNAPSHOT: each stage preset is snapshotted with the
-      // Run (section 3.1.1 rule 6), so a later preset edit cannot change this Run's plan.
-      const stagePresetSnapshots = stageSelection.stagePresets.map((s) => ({
-        stageIndex: s.stageIndex,
-        presetId: s.presetId,
-        snapshot: this.stagePresetSnapshot(s.preset, stageSelection.effectiveAgent.id),
-      }));
-      resolvedWorkflow = {
-        effectiveAgent: stageSelection.effectiveAgent,
-        snapshot: this.workflowSnapshot(loaded),
-        stagePresets: stagePresetSnapshots,
-        stageInstructions: Object.fromEntries(
-          stagePresetSnapshots.map((s) => [s.stageIndex, s.snapshot.instruction]),
-        ),
-        skills: resolvedWorkflowSkills,
-        constraints: stageSelection.effectiveConstraints,
-      };
-    }
-
-    // The workflow resolution's effective agent wins over caller/system fallbacks: it already
-    // applied the caller -> required-stage -> default precedence (section 3.1.1 rules 1-2), and
-    // persisting anything else executes the template on an agent no stage asked for (#842 r2).
-    const presetAgent = presetSnapshot?.effectiveAgent.id;
-    const agent = resolvedWorkflow?.effectiveAgent.id ?? input.agent ?? presetAgent ?? this.deps.defaultAgent;
-    if (!this.deps.knownAgents.includes(agent)) {
-      throw new ValidationError(`Unknown agent: ${agent} (known: ${this.deps.knownAgents.join(', ')})`);
-    }
-
-    // Fail closed on the plan channel (#842 review r3): a workflow Run's steps are guidance the
-    // adapter must actually deliver. Only the Prime/RPC/Claude adapters inject `workflowPlan`
-    // into their prompts; an adapter that never received it would execute the template with
-    // every planned step silently omitted. The check keys on the workflow paths ONLY -- the
-    // retry path re-uses the parent's agent, which already passed this gate at its creation.
-    if (resolvedWorkflow) {
-      const stat = this.deps.agentCapabilities?.()[agent]?.static;
-      if (stat?.workflowPlan !== true) {
-        const declared = stat === undefined
-          ? 'unknown -- the agent has no declared static capabilities'
-          : stat.workflowPlan === undefined
-            ? "undeclared -- the agent's static block omits workflowPlan"
-            : "false -- the agent's static block declares workflowPlan: false";
-        throw new ValidationError(
-          `workflow ${JSON.stringify(resolvedWorkflow?.snapshot.id)} renders an advisory plan,`
-          + ` but agent ${JSON.stringify(agent)} has no workflow-plan prompt channel`
-          + ` (workflowPlan: ${declared}); pick an adapter that carries the plan`,
-        );
-      }
-    }
-
-    // Per-Run model resolution (#823), ONE rule for both paths: caller.model → preset model →
-    // none. On the preset path resolvePreset already applied the same precedence (and enforced
-    // the modelRequired conflict); the snapshot's effectiveAgent.model IS the resolved preset
-    // model. On the no-preset path the caller's value is the only source.
-    //
-    // Fail closed on BOTH paths: an effective model on an agent whose static capabilities lack
-    // `perRunModel: true` is refused at creation, with the same three-way wording (unknown /
-    // undeclared / false) resolvePreset uses for the preset path. Today that refuses every real
-    // agent, which is correct until the adapters declare the capability (P1-2..P1-4).
-    const presetModel = presetSnapshot?.effectiveAgent.model;
-    const model = input.model ?? resolvedWorkflow?.effectiveAgent.model ?? presetModel;
-    if (model !== undefined) {
-      // The RESOLVED model is validated too (#832 r1): a preset carrying `agent.model: "two
-      // words"` passes preset validation today, and only this check keeps the persisted value
-      // inside the same contract the caller surface has.
-      validateModelShape(model, 'model');
-      const stat = this.deps.agentCapabilities?.()[agent]?.static;
-      if (stat?.perRunModel !== true) {
-        const declared = stat === undefined
-          ? 'unknown -- the agent has no declared static capabilities'
-          : stat.perRunModel === undefined
-            ? "undeclared -- the agent's static block omits perRunModel"
-            : "false -- the agent's static block declares perRunModel: false";
-        const source = input.model !== undefined ? 'per-Run model' : 'preset model';
-        throw new ValidationError(
-          `the ${source} ${JSON.stringify(model)} was requested, but agent ${JSON.stringify(agent)}`
-          + ` cannot take a per-Run model (perRunModel: ${declared});`
-          + ' pick an agent that accepts a per-Run model, or drop the model',
-        );
-      }
-    }
-
-    // Laya selection record (#854). Validated AFTER the idempotency-replay check (so a replayed
-    // key returns the original Run and its original record; the new body's `selection` is
-    // ignored, exactly like `model`) and after agent/model resolution, because `chosen` is
-    // checked against what actually resolved. Fail-closed: a record that cannot be trusted to
-    // describe what ran is refused, never partially stored. It is attribution only -- nothing
-    // here changes execution -- so the accepted set is a strict v1 schema, not a grab-bag.
-    // Only `undefined` counts as omitted: an explicit `null` fails the object check (Copilot
-    // review of #865) -- a documented object field may not smuggle a null past validation.
-    const selection = input.selection !== undefined
-      ? validateSelection(input.selection, agent, model)
-      : undefined;
-
-    // Goal admission. Everything about this block is fail-closed, because the failure mode
-    // this feature was designed against is accepting a goal and silently not honouring it
-    // (issue #459). A goal that cannot be tracked is refused here with the reason, before any
-    // state is written -- not accepted, stored, and then never updated.
-    let goalState: GoalState | null = null;
-    if (input.goal !== undefined && input.goal !== null) {
-      let spec;
-      try {
-        spec = resolveGoalSpec(input.goal, input.task);
-      } catch (err) {
-        throw new ValidationError(err instanceof GoalValidationError ? err.message : `invalid goal: ${String(err)}`);
-      }
-      if (!this.deps.goals) {
-        throw new ValidationError('goals are not enabled on this server');
-      }
-      const cap = this.deps.agentCapabilities?.()[agent]?.goals;
-      if (!cap?.supported) {
-        throw new ValidationError(
-          goalCapabilityMessage(agent, cap ?? { supported: false, reason: 'unsupported' }),
-        );
-      }
-      // `set` being supported says nothing about the rest of the spec. Each supplied field is
-      // checked against its own matrix entry, because accepting a field the backend cannot act
-      // on is the exact failure this feature was written to prevent (issue #459) -- and it is
-      // worse than dropping it, since the field is persisted and rendered, so the operator sees
-      // gates or a contract that nothing will ever evaluate while the Run sails to COMPLETED.
-      //
-      // Checked on the RESOLVED spec rather than the raw input: `contract: {}` normalises away
-      // to nothing, and refusing that would reject a request that carries no contract at all.
-      for (const field of ['tokenBudget', 'contract', 'gates', 'maxTurns'] as const) {
-        if (spec[field] === undefined) continue;
-        const fieldCap = cap.fields?.[field] ?? { supported: false, reason: 'unsupported' as const };
-        if (!fieldCap.supported) {
-          throw new ValidationError(goalFieldCapabilityMessage(agent, field, fieldCap));
-        }
-      }
-      // Redact before persisting. `runs.task` is redacted at write time because tasks
-      // carry credentials (issue #43); resolving the objective from the RAW task and storing
-      // it unredacted in a new table would route around that protection entirely, so this is
-      // a leak rather than an audit note.
-      //
-      // Applied to the resolved value, not just the default: an explicit objective is free
-      // text supplied by the same caller that supplies the task, and is no less likely to
-      // carry a key. Contract fields and gate commands are the same kind of text.
-      const redact = this.deps.redactor;
-      const safeObjective = redact ? redact.redact(spec.objective) : spec.objective;
-      const safeContract = spec.contract && redact
-        ? Object.fromEntries(
-            Object.entries(spec.contract).map(([k, v]) => [k, redact.redact(v)]),
-          ) as GoalState['contract']
-        : spec.contract;
-      const safeGates = spec.gates && redact
-        ? spec.gates.map((g) => ({ ...g, command: redact.redact(g.command) }))
-        : spec.gates;
-
-      goalState = {
-        runId: '',
-        status: 'active',
-        objective: safeObjective,
-        contract: safeContract,
-        gates: safeGates,
-        tokenBudget: spec.tokenBudget,
-        // The caller set this; a harness reports back under 'harness'.
-        source: 'operator',
-        updatedAt: new Date().toISOString(),
-      };
-    }
-    const available = this.deps.skills.list();
-    // An omitted `skills` means "choose for me"; an explicitly empty array means
-    // "no skills". Collapsing the two (issue #459) made every Run carry at least one
-    // skill, because select() falls back rather than returning nothing -- and a Run
-    // that always carries skill ids cannot be handed to a backend that resolves them
-    // in its own namespace. HermesAgentAdapter passes `-s <id>`, Hermes looks that up
-    // in its installed-skill store, and an unknown name is a fatal exit, so Hermes
-    // could not execute any Run at all. `null` stays "omitted" so a JSON caller that
-    // sends null keeps today's behaviour.
-    // A snapshot, when the caller supplies one, replaces resolution rather than supplementing it:
-    // resolving the parent's ids here would read the live registry anyway, and would throw for a
-    // skill deleted since the parent ran (#506).
-    // Which namespace the target backend resolves skills in, read from the capability descriptor
-    // rather than a hardcoded per-agent map (#507, using the vocabulary #508 added). A hardcoded map
-    // is a second source of truth that drifts from the adapter: the adapter is what actually decides
-    // what reaches the child process, so asking it is the only answer that cannot go stale.
-    const skillDelivery = this.deps.agentCapabilities?.()[agent]?.static?.skills;
-    // ONLY `nativeNames` is disqualifying, and the reason is the failure MODE, not the delivery mode.
-    //
-    //   workspacePaths -- Mercury ids become workspace paths the worker materialised. Usable.
-    //   nativeNames    -- the backend resolves the name in its OWN store and EXITS NON-ZERO on an
-    //                     unknown one. Every selected id is a guaranteed Run failure.
-    //   none           -- the adapter ignores skills entirely. Harmless: the ids are recorded and
-    //                     materialised, nothing forwards them, nothing dies.
-    //
-    // Treating `none` as incompatible was my first attempt and it broke 8 tests, because the `fake`
-    // adapter declares `none` (#508) and every test Run uses it. `none` describes what the adapter
-    // forwards, not whether Mercury may hold skill records -- so it must not change selection.
-    const canUseMercurySkills = skillDelivery !== 'nativeNames';
-    // A preset owns skill selection when it is present: the snapshot's effectiveSkills ARE the
-    // resolved list (autoSelect already applied above). A snapshot (retry) carries the parent's
-    // exact skill rows. Only a Run without a preset follows the original path.
-    const resolved = resolvedWorkflow?.skills ?? (presetSnapshot
-      ? presetSnapshot.effectiveSkills
-      : input.skillSnapshots ?? this.deps.skills.resolve(
-          input.skills === undefined || input.skills === null
-            // An omitted `skills` for a nativeNames backend resolves to NOTHING. Not "fallback
-            // suppressed" -- even a well-matched Mercury id is a fatal exit there, so selection is skipped
-            // rather than merely denied its fallback.
-            ? canUseMercurySkills
-              ? this.deps.selector.select(input.task, available, 4)
-              : []
-            : input.skills,
-        ));
-
-    // Knowledge admission, validated before anything is written -- the same shape goal admission uses,
-    // for the same reason: a block that is accepted and then quietly ignored leaves the caller believing
-    // a constraint is in force.
-    //
-    // The feature being off is a refusal rather than a no-op. A caller who set `scopes` against a host
-    // with no Atlas configured would otherwise get a normal-looking Run that knew nothing.
-    let knowledgeRequest: KnowledgeRequest | null = null;
-    if (input.knowledge !== undefined && input.knowledge !== null) {
-      if (!this.deps.knowledge) {
-        throw new ValidationError(
-          'knowledge is not configured on this server (set MERCURY_ATLAS_URL); remove the knowledge block',
-        );
-      }
-      try {
-        knowledgeRequest = parseKnowledgeRequest(input.knowledge);
-      } catch (err) {
-        throw new ValidationError(err instanceof KnowledgeRequestError ? err.message : String(err));
-      }
-    }
-
-    // With a preset, the snapshot's effectiveConstraints ARE the Run's constraints: resolution
-    // already merged the caller input with preset ceilings/defaults and system policy, and the
-    // executed Run must match what the snapshot records (otherwise the snapshot documents
-    // limits the worker never applies). The legacy path below is the no-preset behavior.
-    const constraints: RunConstraints = resolvedWorkflow
-      ? resolvedWorkflow.constraints
-      : presetSnapshot
-      ? presetSnapshot.effectiveConstraints
-      : {
-        maxDurationMs: input.constraints?.maxDurationMs ?? this.deps.defaultMaxDurationMs,
-        maxRetries: input.constraints?.maxRetries ?? this.deps.defaultMaxRetries,
-        // Absolute deadline that counts queue time (#731); inherited verbatim by retries.
-        notAfter: input.constraints?.notAfter,
-        // Bot attribution hint (dispatcher-bot-design §4.3); recorded verbatim, never enforced.
-        botTask: input.constraints?.botTask,
-        budgetTokens: input.constraints?.budgetTokens,
-        budgetCost: input.constraints?.budgetCost,
-        resourceLimits: input.constraints?.resourceLimits,
-        allowedNetworks: input.constraints?.allowedNetworks,
-      };
-
-    // `repository` is the primary (the workspace checks it out); `repositories`
-    // holds additional repos cloned under workspace/repos/. When only the list
-    // form is given, its first entry is the primary.
-    const repositories = input.repositories && input.repositories.length > 0
-      ? input.repositories
-      : undefined;
-    const repository = input.repository ?? (repositories?.[0] ?? {});
-
-    // Credential profile resolution (CP-3, issue #807, design §5.4). AFTER `repository` is
-    // settled (the primary is the first list entry when only the list form is given), BEFORE
-    // anything is written: a refusal must leave no Run row, no event, no skill snapshot.
-    //
-    // Resolved against the REDACTED repository objects that are about to be stored, computed
-    // HERE so resolution and persistence read the same bytes: the claim-time re-check
-    // (worker.ts) re-resolves the stored objects, so resolving the raw URLs at creation and
-    // redacted ones at claim could make an unchanged file look like a parity violation
-    // (Copilot review round 1 on #841). A redaction that mangles a URL into an unnormalizable
-    // shape yields no id on BOTH sides (resolveProfile skips it), so the Run consistently
-    // resolves to no profile rather than flapping. Refusals carry the profile NAME and the
-    // reason (§5.4) — never the file's contents, env names or file paths: a caller who may not
-    // use a profile learns nothing about it.
-    const safeTask = this.deps.redactor ? this.deps.redactor.redact(input.task) : input.task;
-    const safeRepository = this.deps.redactor ? this.deps.redactor.redactJson(repository) as RepositoryContext : repository;
-    const safeRepositories = this.deps.redactor && repositories ? this.deps.redactor.redactJson(repositories) as RepositoryContext[] : repositories;
-    let credentialProfile: string | null = null;
-    if (this.deps.credentialProfiles) {
-      const resolution = this.resolveCredentialProfile(
-        [safeRepository, ...(safeRepositories ?? [])],
-        input.ownerId,
-      );
-      if (resolution.outcome === 'refused') {
-        throw new ForbiddenError(resolution.message);
-      }
-      if (resolution.outcome === 'profile') {
-        credentialProfile = resolution.name;
-      }
-      // Resume parity against the SAME read that produced `credentialProfile` (retry only):
-      // the retry must never persist a profile other than what the parent was created under.
-      if (input.retryCredentialProfile !== undefined && credentialProfile !== input.retryCredentialProfile) {
-        throw new ConflictError(
-          'credential profile changed since creation'
-          + ` (created under ${input.retryCredentialProfile ? `'${input.retryCredentialProfile}'` : 'no profile'},`
-          + ` now ${credentialProfile ? `'${credentialProfile}'` : 'no profile'});`
-          + ' create a new Run instead of retrying under a changed identity',
-        );
-      }
-    }
-
-    // Whether this Run gets a pack, and whether asking for one is even possible on this agent.
-    //
-    // The asymmetry is deliberate and comes from section 7.4. Ingest fails OPEN: an agent whose ability
-    // to receive a pack is unverified simply gets no pack, because an unknown harness version must not
-    // brick a Run. `require: true` fails CLOSED: a caller who asked for the pack and did not get it was
-    // given something other than what they asked for, and silence is the wrong way to report that.
-    const knowledgeDeps = this.deps.knowledge;
-    const wantsPack = knowledgeDeps !== undefined
-      && (knowledgeRequest?.enabled ?? knowledgeDeps.injectByDefault);
-    const knowledgeCap = knowledgeDeps ? knowledgeDeps.capabilities?.()[agent]?.static?.knowledge : undefined;
-    if (knowledgeRequest?.require && !wantsPack) {
-      throw new ValidationError(
-        knowledgeCapabilityMessage(agent, knowledgeDeps
-          ? 'injection is disabled for this host and knowledge.enabled was false'
-          : 'knowledge is not configured on this server'),
-      );
-    }
-    if (knowledgeRequest?.require && knowledgeCap === false) {
-      throw new ValidationError(knowledgeCapabilityMessage(agent, 'the adapter does not declare knowledge support'));
-    }
     // Computed inside the transaction below, because it reads the replica and the snapshot must be
     // consistent with the Run row that references it. Declared here so the event append can see it.
     let knowledgeSelection: PackSelection | null = null;
@@ -1402,6 +796,666 @@ export class RunService {
       }
       throw err;
     }
+  }
+
+  /**
+   * Creation admission: everything `create()` does before it writes anything (A0-5, #989).
+   *
+   * The pre-replay checks, the shared shape validator, the idempotency replay, preset and
+   * workflow resolution, agent/model determination, the selection/goal/skills/knowledge checks,
+   * repository redaction and the credential-profile resolution. It throws exactly the
+   * ValidationError/ForbiddenError `create()` would have thrown, and writes NOTHING: the A2A
+   * server-load validation (docs/a2a-design.md section 6.2) runs this on every exposed-skill
+   * template, so the checks that need server state (agent registered, preset/workflow
+   * resolvable, capability matrices, the profile) run through the same code `create()` uses --
+   * and a skill that cannot create a valid Run never reaches the card, without creating a Run
+   * a worker would pick up.
+   */
+  admitCreateRequest(input: CreateRunInput): CreateAdmission | { replayed: Run } {
+    // The type guard is part of the check, not a formality: a non-string task (a 123 the JSON
+    // boundary lets through) has no .trim(), and without it this line is a TypeError that both
+    // create routes answer 500 with while the offline validator says `task is required` (#989
+    // round 2). The shared validator below runs the same check a second time, after replay.
+    if (typeof input.task !== 'string' || !input.task || input.task.trim().length === 0) {
+      throw new ValidationError('task is required');
+    }
+    if (input.constraints) validateConstraints(input.constraints);
+    // Per-Run model shape validation (#823). It reaches argv/config in the adapters (P1-2/P1-3),
+    // so it must be a single shell-safe token: no whitespace or control characters, bounded
+    // length. An empty string is 'no model' vs an invalid value — refused rather than silently
+    // dropped, because a dropped override silently executes with the wrong model.
+    if (input.model !== undefined) {
+      validateModelShape(input.model, 'model');
+    }
+    // Internal-only, so this is a fail-closed guard rather than a caller-facing rule (the same
+    // spirit as RunStore.transition refusing a caller-supplied statusChangedAt): a malformed link
+    // would silently corrupt the chain -- an attempt that disagrees with its parent, or a retry
+    // with no parent at all -- and nothing downstream could tell.
+    if (input.retryLink !== undefined) {
+      const { retryOf, attempt } = input.retryLink;
+      if (typeof retryOf !== 'string' || retryOf.length === 0 || !Number.isInteger(attempt) || attempt < 2) {
+        throw new ValidationError('retryLink requires a parent run id and an attempt of at least 2');
+      }
+      if (this.deps.runs.get(retryOf) === null) {
+        throw new ValidationError(`retryLink names a parent that does not exist: ${retryOf}`);
+      }
+    }
+    if (input.idempotencyKey) {
+      const existing = this.findByIdempotencyKey(input.ownerId, input.idempotencyKey);
+      if (existing) return { replayed: existing };
+    }
+
+    // A0-5 (#989): the caller's blocks go through the SAME pure shape check POST /api/runs
+    // and the template validators (host a2a validate, host bot validate) use -- one
+    // validator, not two. It runs AFTER the replay check on purpose: a replayed key returns
+    // the original Run and its original record, and the new body's blocks are ignored --
+    // the rule selection/goal/knowledge/preset/workflow always followed (each was validated
+    // only after the replay). The task/constraints/model checks above run a second time
+    // here, deliberately: they also guard their pre-replay position, where they always were.
+    validateCreateRequest({
+      task: input.task,
+      repository: input.repository,
+      repositories: input.repositories,
+      agent: input.agent,
+      skills: input.skills,
+      constraints: input.constraints,
+      goal: input.goal,
+      knowledge: input.knowledge,
+      preset: input.preset,
+      workflow: input.workflow,
+      model: input.model,
+      selection: input.selection,
+    });
+
+    // Preset resolution (section 5): BEFORE agent/skills/constraints so the preset acts as
+    // defaults the caller can override (and required fields the caller cannot). A retry that
+    // carries presetSnapshot skips resolution entirely -- same bytes as the parent, exactly
+    // like skillSnapshots.
+    let presetSnapshot: ResolvedRolePreset | null = input.presetSnapshot ?? null;
+    // `undefined` is the only omitted value (#859 r2): `input.preset &&` let explicit falsy
+    // blocks (`preset: null`, "" or 0) slip past the closed-shape check as preset-less Runs,
+    // leaving the documented "preset must be an object" contract open and the null branch in
+    // it dead. Match `selection` (#865) and `workflow`: presence is checked, then shape.
+    if (input.preset !== undefined && !presetSnapshot) {
+      // A retry never re-reads the caller's preset block (it uses presetSnapshot, same bytes
+      // as the parent), so this path only guards creations. The block's closed shape and
+      // field types are validated up front by validateCreateRequest (#989), the same check
+      // POST /api/runs and the template validators use.
+      if (!this.deps.presets) {
+        throw new ValidationError('presets are not enabled on this server; remove the preset block');
+      }
+      const loaded = this.deps.presets.get(input.preset.id);
+      if (input.preset.version && loaded.version !== input.preset.version) {
+        throw new ValidationError(
+          `preset ${JSON.stringify(input.preset.id)} is version ${loaded.version}, not the requested ${input.preset.version}`,
+        );
+      }
+      if (!loaded.enabled) {
+        throw new ValidationError(`preset ${JSON.stringify(loaded.id)} is disabled`);
+      }
+      const stat = this.deps.agentCapabilities?.();
+      const selection = resolvePreset(
+        loaded.manifest,
+        {
+          agent: input.agent,
+          // Caller surface exists now (#823): the caller's model wins unless the preset requires
+          // its own (modelRequired conflict stays enforced inside resolvePreset).
+          model: input.model,
+          skills: input.skills,
+          constraints: input.constraints,
+        } satisfies PresetCallerInput,
+        {
+          defaultAgent: this.deps.defaultAgent,
+          defaultMaxDurationMs: this.deps.defaultMaxDurationMs,
+          defaultMaxRetries: this.deps.defaultMaxRetries,
+        },
+        {
+          knownAgents: this.deps.knownAgents,
+          staticCapabilities: (agentId) => stat?.[agentId]?.static,
+        },
+      );
+
+      // Skills: auto-selection (section 3.2 step 2) needs the task text and the available
+      // list, so the selector runs here, not inside resolvePreset -- which flags the case
+      // (empty start list, autoSelect not disabled). A nativeNames backend with
+      // preset skills is a guaranteed fatal exit (issue #507's lesson), so preset skills fail
+      // closed for one instead of being silently recorded.
+      let skillIds = selection.effectiveSkillIds;
+      if (selection.autoSelect) {
+        const skillDelivery = this.deps.agentCapabilities?.()[selection.effectiveAgent.id]?.static?.skills;
+        if (skillDelivery !== 'nativeNames') {
+          // Section 3.2 as amended by #724: the selector runs whenever the start list is empty,
+          // and the preset's required skills are appended AFTER its picks (steps 3-4). The
+          // selector's budget shrinks by the DISTINCT required count so the merged, deduplicated
+          // list still fits the effective maximum without dropping a required skill -- required
+          // skills are "always present" by definition.
+          // Validation caps DISTINCT ids, so dedupe before the budget math: duplicates in the
+          // required list would otherwise shrink the selector's budget more than the final
+          // deduped list needs.
+          const required: string[] = [];
+          const seenRequired = new Set<string>();
+          for (const id of selection.effectiveSkillIds) {
+            if (seenRequired.has(id)) continue;
+            seenRequired.add(id);
+            required.push(id);
+          }
+          const cap = selection.skillCap;
+          const picks = this.deps.selector.select(
+            input.task,
+            this.deps.skills.list(),
+            Math.max(0, cap - required.length),
+          );
+          const seen = new Set<string>();
+          skillIds = [];
+          for (const id of [...picks, ...required]) {
+            if (seen.has(id)) continue;
+            seen.add(id);
+            skillIds.push(id);
+          }
+          // Step 5, enforced on the final merged list rather than assumed from the budget: a
+          // selector that ignores its budget or an over-cap required set fails the Run at
+          // creation with the same message resolveSkillIds uses for the named path.
+          if (skillIds.length > cap) {
+            throw new ValidationError(
+              `preset resolves to ${skillIds.length} skills; the effective maximum is ${cap}`,
+            );
+          }
+        }
+      }
+      if (skillIds.length > 0
+        && this.deps.agentCapabilities?.()[selection.effectiveAgent.id]?.static?.skills === 'nativeNames') {
+        throw new ValidationError(
+          `preset ${JSON.stringify(loaded.id)} names skills, but agent ${JSON.stringify(selection.effectiveAgent.id)}`
+          + ' resolves skill names in its own store; a missing one is a fatal exit. Run this preset'
+          + ' on an agent that reads workspace skills.',
+        );
+      }
+      const resolvedSkills = this.deps.skills.resolve(skillIds);
+      presetSnapshot = {
+        schemaVersion: 1,
+        id: loaded.id,
+        version: loaded.version,
+        role: loaded.role,
+        description: loaded.description,
+        trust: loaded.trust,
+        instruction: loaded.instruction,
+        effectiveAgent: selection.effectiveAgent,
+        effectiveSkills: resolvedSkills,
+        effectiveConstraints: selection.effectiveConstraints,
+        source: { kind: loaded.source.kind, relativePath: loaded.source.relativePath },
+        files: loaded.files,
+        contentHash: loaded.contentHash,
+      };
+    }
+
+    // Advisory Workflow Template resolution (docs/crew/workflows.md section 3.1, issue #809).
+    // BEFORE skills/constraints like the preset block: the stage presets act as demands the
+    // caller cannot ignore and ceilings the caller cannot widen (section 3.1.1). Fail-closed
+    // like every other admission block: a template or preset reference that cannot resolve is
+    // a refused creation, never a Run that silently runs without its plan.
+    let resolvedWorkflow: ResolvedWorkflowAdmission | null = null;
+    if (input.workflowSnapshot !== undefined) {
+      // Internal retry path (#842 review): the parent's stored snapshot rows, verbatim. No
+      // registry read at all -- the template may have been deleted or rewritten since the
+      // parent ran, and the retry must execute the parent's bytes, not a re-resolution. The
+      // Run row's constraints ARE the parent's effective set (retry copies original.constraints),
+      // which is exactly the set resolution would have produced.
+      const wfSnap = input.workflowSnapshot.workflow;
+      if (input.workflow !== undefined) {
+        throw new ValidationError('workflow and workflowSnapshot are mutually exclusive');
+      }
+      resolvedWorkflow = {
+        // Retry passes the parent's agent/model explicitly, so this is not consulted -- the
+        // parent's values are the resolution's output, already persisted on its Run row.
+        effectiveAgent: { id: input.agent ?? this.deps.defaultAgent },
+        snapshot: wfSnap,
+        stagePresets: input.workflowSnapshot.stagePresets.map((sp) => ({
+          stageIndex: sp.stageIndex,
+          presetId: sp.snapshot.id,
+          snapshot: sp.snapshot,
+        })),
+        stageInstructions: Object.fromEntries(
+          input.workflowSnapshot.stagePresets.map((sp) => [sp.stageIndex, sp.snapshot.instruction]),
+        ),
+        skills: input.workflowSnapshot.skills,
+        constraints: {
+          maxDurationMs: input.constraints?.maxDurationMs ?? this.deps.defaultMaxDurationMs,
+          maxRetries: input.constraints?.maxRetries ?? this.deps.defaultMaxRetries,
+          notAfter: input.constraints?.notAfter,
+          botTask: input.constraints?.botTask,
+          budgetTokens: input.constraints?.budgetTokens,
+          budgetCost: input.constraints?.budgetCost,
+          resourceLimits: input.constraints?.resourceLimits,
+          allowedNetworks: input.constraints?.allowedNetworks,
+        },
+      };
+    } else if (input.workflow !== undefined) {
+      // The block's closed shape, field types and the preset mutual exclusion are validated up
+      // front by validateCreateRequest (#989); `wf` is that guaranteed shape.
+      const wf = input.workflow as { id: string; version?: string };
+      if (!this.deps.workflows) {
+        throw new ValidationError('workflows are not enabled on this server; remove the workflow block');
+      }
+      // Version pin = optimistic guard, the same rule the preset block applies: a pinned
+      // version that does not resolve is refused rather than silently re-resolved.
+      let loaded: LoadedWorkflow;
+      try {
+        loaded = this.deps.workflows.get(wf.id);
+      } catch (err) {
+        if (err instanceof NotFoundError) {
+          // Unknown template -> the W-1 code vocabulary (issue #809 acceptance 5): the
+          // registry's NotFoundError becomes a validation error carrying the code, so service
+          // callers branch on codes, not prose. An INVALID template is not rewritten: its
+          // WorkflowValidationFailure already carries the W-1 findings.
+          throw new WorkflowPresetResolutionError('WORKFLOW_NOT_FOUND', 'workflow.id',
+            `workflow ${JSON.stringify(wf.id)} does not resolve in the workflow registry`);
+        }
+        throw err;
+      }
+      if (wf.version !== undefined && loaded.version !== wf.version) {
+        throw new ValidationError(
+          `workflow ${JSON.stringify(loaded.id)} is version ${loaded.version}, not the requested ${wf.version}`,
+        );
+      }
+      if (!this.deps.presets) {
+        throw new ValidationError(
+          'workflows resolve stage presets, so presets must be enabled on this server',
+        );
+      }
+      const stageSelection = resolveWorkflowStages(
+        loaded,
+        {
+          agent: input.agent,
+          model: input.model,
+          skills: input.skills,
+          constraints: input.constraints,
+        },
+        {
+          defaultAgent: this.deps.defaultAgent,
+          defaultMaxDurationMs: this.deps.defaultMaxDurationMs,
+          defaultMaxRetries: this.deps.defaultMaxRetries,
+        },
+        {
+          knownAgents: this.deps.knownAgents,
+          staticCapabilities: (agentId) => this.deps.agentCapabilities?.()[agentId]?.static,
+        },
+        (id) => this.deps.presets!.get(id),
+      );
+      // Skill resolution (section 3.1.1 rule 4, deferring to role-presets section 3.2): the
+      // caller's list when PROVIDED (an explicit [] means "no skills" and suppresses
+      // auto-selection), otherwise the per-stage selector picks; then the union of the stages'
+      // REQUIRED skills appended, deduped by first occurrence; then the strictest stage's cap.
+      // Exceeding it FAILS -- nothing is dropped (#842 review r5: caller skills were discarded).
+      const skillCap = stageSelection.skillCap;
+      const requiredSkills = stageSelection.requiredSkillIds;
+      const skillIds: string[] = [];
+      const seenSkill = new Set<string>();
+      const pushSkill = (id: string): void => {
+        if (seenSkill.has(id)) return;
+        seenSkill.add(id);
+        skillIds.push(id);
+      };
+      if (input.skills !== undefined) {
+        for (const id of input.skills) pushSkill(id);
+      } else {
+        for (const stage of stageSelection.autoSelectStages) {
+          const preset = stageSelection.stagePresets.find((s) => s.stageIndex === stage.stageIndex)?.preset;
+          if (!preset) continue;
+          const skillDeliveryForStage = this.deps.agentCapabilities?.()[stageSelection.effectiveAgent.id]?.static?.skills;
+          if (skillDeliveryForStage === 'nativeNames') continue; // guarded again below, on the merged list
+          const picks = this.deps.selector.select(
+            // The stage's own task: selection guidance is per step, never the whole plan.
+            loaded.stages[stage.stageIndex]?.task ?? input.task,
+            this.deps.skills.list(),
+            // Budget = cap - required (decision 2A): the required skills are appended after.
+            Math.max(0, skillCap - requiredSkills.length - skillIds.length),
+          );
+          for (const id of picks) pushSkill(id);
+        }
+      }
+      for (const id of requiredSkills) pushSkill(id);
+      if (skillIds.length > skillCap) {
+        throw new ValidationError(
+          `workflow ${JSON.stringify(loaded.id)} resolves to ${skillIds.length} skills (caller list plus`
+          + ` stage-required skills); the effective maximum is ${skillCap}, the strictest stage's cap`,
+        );
+      }
+      if (skillIds.length > 0
+        && this.deps.agentCapabilities?.()[stageSelection.effectiveAgent.id]?.static?.skills === 'nativeNames') {
+        throw new ValidationError(
+          `workflow ${JSON.stringify(loaded.id)} resolves skills, but agent`
+          + ` ${JSON.stringify(stageSelection.effectiveAgent.id)} resolves skill names in its own`
+          + ' store; a missing one is a fatal exit. Run this workflow on an agent that reads'
+          + ' workspace skills.',
+        );
+      }
+      const resolvedWorkflowSkills = this.deps.skills.resolve(skillIds);
+      // Stage preset instructions ride the SNAPSHOT: each stage preset is snapshotted with the
+      // Run (section 3.1.1 rule 6), so a later preset edit cannot change this Run's plan.
+      const stagePresetSnapshots = stageSelection.stagePresets.map((s) => ({
+        stageIndex: s.stageIndex,
+        presetId: s.presetId,
+        snapshot: this.stagePresetSnapshot(s.preset, stageSelection.effectiveAgent.id),
+      }));
+      resolvedWorkflow = {
+        effectiveAgent: stageSelection.effectiveAgent,
+        snapshot: this.workflowSnapshot(loaded),
+        stagePresets: stagePresetSnapshots,
+        stageInstructions: Object.fromEntries(
+          stagePresetSnapshots.map((s) => [s.stageIndex, s.snapshot.instruction]),
+        ),
+        skills: resolvedWorkflowSkills,
+        constraints: stageSelection.effectiveConstraints,
+      };
+    }
+
+    // The workflow resolution's effective agent wins over caller/system fallbacks: it already
+    // applied the caller -> required-stage -> default precedence (section 3.1.1 rules 1-2), and
+    // persisting anything else executes the template on an agent no stage asked for (#842 r2).
+    const presetAgent = presetSnapshot?.effectiveAgent.id;
+    const agent = resolvedWorkflow?.effectiveAgent.id ?? input.agent ?? presetAgent ?? this.deps.defaultAgent;
+    if (!this.deps.knownAgents.includes(agent)) {
+      throw new ValidationError(`Unknown agent: ${agent} (known: ${this.deps.knownAgents.join(', ')})`);
+    }
+
+    // Fail closed on the plan channel (#842 review r3): a workflow Run's steps are guidance the
+    // adapter must actually deliver. Only the Prime/RPC/Claude adapters inject `workflowPlan`
+    // into their prompts; an adapter that never received it would execute the template with
+    // every planned step silently omitted. The check keys on the workflow paths ONLY -- the
+    // retry path re-uses the parent's agent, which already passed this gate at its creation.
+    if (resolvedWorkflow) {
+      const stat = this.deps.agentCapabilities?.()[agent]?.static;
+      if (stat?.workflowPlan !== true) {
+        const declared = stat === undefined
+          ? 'unknown -- the agent has no declared static capabilities'
+          : stat.workflowPlan === undefined
+            ? "undeclared -- the agent's static block omits workflowPlan"
+            : "false -- the agent's static block declares workflowPlan: false";
+        throw new ValidationError(
+          `workflow ${JSON.stringify(resolvedWorkflow?.snapshot.id)} renders an advisory plan,`
+          + ` but agent ${JSON.stringify(agent)} has no workflow-plan prompt channel`
+          + ` (workflowPlan: ${declared}); pick an adapter that carries the plan`,
+        );
+      }
+    }
+
+    // Per-Run model resolution (#823), ONE rule for both paths: caller.model → preset model →
+    // none. On the preset path resolvePreset already applied the same precedence (and enforced
+    // the modelRequired conflict); the snapshot's effectiveAgent.model IS the resolved preset
+    // model. On the no-preset path the caller's value is the only source.
+    //
+    // Fail closed on BOTH paths: an effective model on an agent whose static capabilities lack
+    // `perRunModel: true` is refused at creation, with the same three-way wording (unknown /
+    // undeclared / false) resolvePreset uses for the preset path. Today that refuses every real
+    // agent, which is correct until the adapters declare the capability (P1-2..P1-4).
+    const presetModel = presetSnapshot?.effectiveAgent.model;
+    const model = input.model ?? resolvedWorkflow?.effectiveAgent.model ?? presetModel;
+    if (model !== undefined) {
+      // The RESOLVED model is validated too (#832 r1): a preset carrying `agent.model: "two
+      // words"` passes preset validation today, and only this check keeps the persisted value
+      // inside the same contract the caller surface has.
+      validateModelShape(model, 'model');
+      const stat = this.deps.agentCapabilities?.()[agent]?.static;
+      if (stat?.perRunModel !== true) {
+        const declared = stat === undefined
+          ? 'unknown -- the agent has no declared static capabilities'
+          : stat.perRunModel === undefined
+            ? "undeclared -- the agent's static block omits perRunModel"
+            : "false -- the agent's static block declares perRunModel: false";
+        const source = input.model !== undefined ? 'per-Run model' : 'preset model';
+        throw new ValidationError(
+          `the ${source} ${JSON.stringify(model)} was requested, but agent ${JSON.stringify(agent)}`
+          + ` cannot take a per-Run model (perRunModel: ${declared});`
+          + ' pick an agent that accepts a per-Run model, or drop the model',
+        );
+      }
+    }
+
+    // Laya selection record (#854). Validated AFTER the idempotency-replay check (so a replayed
+    // key returns the original Run and its original record; the new body's `selection` is
+    // ignored, exactly like `model`) and after agent/model resolution, because `chosen` is
+    // checked against what actually resolved. Fail-closed: a record that cannot be trusted to
+    // describe what ran is refused, never partially stored. It is attribution only -- nothing
+    // here changes execution -- so the accepted set is a strict v1 schema, not a grab-bag.
+    // Only `undefined` counts as omitted: an explicit `null` fails the object check (Copilot
+    // review of #865) -- a documented object field may not smuggle a null past validation.
+    const selection = input.selection !== undefined
+      ? validateSelection(input.selection, agent, model)
+      : undefined;
+
+    // Goal admission. Everything about this block is fail-closed, because the failure mode
+    // this feature was designed against is accepting a goal and silently not honouring it
+    // (issue #459). A goal that cannot be tracked is refused here with the reason, before any
+    // state is written -- not accepted, stored, and then never updated.
+    let goalState: GoalState | null = null;
+    if (input.goal !== undefined && input.goal !== null) {
+      // The spec's shape was validated up front (validateCreateRequest, #989); this resolves it.
+      const spec = resolveGoalSpec(input.goal, input.task);
+      if (!this.deps.goals) {
+        throw new ValidationError('goals are not enabled on this server');
+      }
+      const cap = this.deps.agentCapabilities?.()[agent]?.goals;
+      if (!cap?.supported) {
+        throw new ValidationError(
+          goalCapabilityMessage(agent, cap ?? { supported: false, reason: 'unsupported' }),
+        );
+      }
+      // `set` being supported says nothing about the rest of the spec. Each supplied field is
+      // checked against its own matrix entry, because accepting a field the backend cannot act
+      // on is the exact failure this feature was written to prevent (issue #459) -- and it is
+      // worse than dropping it, since the field is persisted and rendered, so the operator sees
+      // gates or a contract that nothing will ever evaluate while the Run sails to COMPLETED.
+      //
+      // Checked on the RESOLVED spec rather than the raw input: `contract: {}` normalises away
+      // to nothing, and refusing that would reject a request that carries no contract at all.
+      for (const field of ['tokenBudget', 'contract', 'gates', 'maxTurns'] as const) {
+        if (spec[field] === undefined) continue;
+        const fieldCap = cap.fields?.[field] ?? { supported: false, reason: 'unsupported' as const };
+        if (!fieldCap.supported) {
+          throw new ValidationError(goalFieldCapabilityMessage(agent, field, fieldCap));
+        }
+      }
+      // Redact before persisting. `runs.task` is redacted at write time because tasks
+      // carry credentials (issue #43); resolving the objective from the RAW task and storing
+      // it unredacted in a new table would route around that protection entirely, so this is
+      // a leak rather than an audit note.
+      //
+      // Applied to the resolved value, not just the default: an explicit objective is free
+      // text supplied by the same caller that supplies the task, and is no less likely to
+      // carry a key. Contract fields and gate commands are the same kind of text.
+      const redact = this.deps.redactor;
+      const safeObjective = redact ? redact.redact(spec.objective) : spec.objective;
+      const safeContract = spec.contract && redact
+        ? Object.fromEntries(
+            Object.entries(spec.contract).map(([k, v]) => [k, redact.redact(v)]),
+          ) as GoalState['contract']
+        : spec.contract;
+      const safeGates = spec.gates && redact
+        ? spec.gates.map((g) => ({ ...g, command: redact.redact(g.command) }))
+        : spec.gates;
+
+      goalState = {
+        runId: '',
+        status: 'active',
+        objective: safeObjective,
+        contract: safeContract,
+        gates: safeGates,
+        tokenBudget: spec.tokenBudget,
+        // The caller set this; a harness reports back under 'harness'.
+        source: 'operator',
+        updatedAt: new Date().toISOString(),
+      };
+    }
+    const available = this.deps.skills.list();
+    // An omitted `skills` means "choose for me"; an explicitly empty array means
+    // "no skills". Collapsing the two (issue #459) made every Run carry at least one
+    // skill, because select() falls back rather than returning nothing -- and a Run
+    // that always carries skill ids cannot be handed to a backend that resolves them
+    // in its own namespace. HermesAgentAdapter passes `-s <id>`, Hermes looks that up
+    // in its installed-skill store, and an unknown name is a fatal exit, so Hermes
+    // could not execute any Run at all. `null` stays "omitted" so a JSON caller that
+    // sends null keeps today's behaviour.
+    // A snapshot, when the caller supplies one, replaces resolution rather than supplementing it:
+    // resolving the parent's ids here would read the live registry anyway, and would throw for a
+    // skill deleted since the parent ran (#506).
+    // Which namespace the target backend resolves skills in, read from the capability descriptor
+    // rather than a hardcoded per-agent map (#507, using the vocabulary #508 added). A hardcoded map
+    // is a second source of truth that drifts from the adapter: the adapter is what actually decides
+    // what reaches the child process, so asking it is the only answer that cannot go stale.
+    const skillDelivery = this.deps.agentCapabilities?.()[agent]?.static?.skills;
+    // ONLY `nativeNames` is disqualifying, and the reason is the failure MODE, not the delivery mode.
+    //
+    //   workspacePaths -- Mercury ids become workspace paths the worker materialised. Usable.
+    //   nativeNames    -- the backend resolves the name in its OWN store and EXITS NON-ZERO on an
+    //                     unknown one. Every selected id is a guaranteed Run failure.
+    //   none           -- the adapter ignores skills entirely. Harmless: the ids are recorded and
+    //                     materialised, nothing forwards them, nothing dies.
+    //
+    // Treating `none` as incompatible was my first attempt and it broke 8 tests, because the `fake`
+    // adapter declares `none` (#508) and every test Run uses it. `none` describes what the adapter
+    // forwards, not whether Mercury may hold skill records -- so it must not change selection.
+    const canUseMercurySkills = skillDelivery !== 'nativeNames';
+    // A preset owns skill selection when it is present: the snapshot's effectiveSkills ARE the
+    // resolved list (autoSelect already applied above). A snapshot (retry) carries the parent's
+    // exact skill rows. Only a Run without a preset follows the original path.
+    const resolved = resolvedWorkflow?.skills ?? (presetSnapshot
+      ? presetSnapshot.effectiveSkills
+      : input.skillSnapshots ?? this.deps.skills.resolve(
+          input.skills === undefined || input.skills === null
+            // An omitted `skills` for a nativeNames backend resolves to NOTHING. Not "fallback
+            // suppressed" -- even a well-matched Mercury id is a fatal exit there, so selection is skipped
+            // rather than merely denied its fallback.
+            ? canUseMercurySkills
+              ? this.deps.selector.select(input.task, available, 4)
+              : []
+            : input.skills,
+        ));
+
+    // Knowledge admission, validated before anything is written -- the same shape goal admission uses,
+    // for the same reason: a block that is accepted and then quietly ignored leaves the caller believing
+    // a constraint is in force.
+    //
+    // The feature being off is a refusal rather than a no-op. A caller who set `scopes` against a host
+    // with no Atlas configured would otherwise get a normal-looking Run that knew nothing.
+    let knowledgeRequest: KnowledgeRequest | null = null;
+    if (input.knowledge !== undefined && input.knowledge !== null) {
+      if (!this.deps.knowledge) {
+        throw new ValidationError(
+          'knowledge is not configured on this server (set MERCURY_ATLAS_URL); remove the knowledge block',
+        );
+      }
+      // The block's shape was validated up front (validateCreateRequest, #989); this parses it.
+      knowledgeRequest = parseKnowledgeRequest(input.knowledge);
+    }
+
+    // With a preset, the snapshot's effectiveConstraints ARE the Run's constraints: resolution
+    // already merged the caller input with preset ceilings/defaults and system policy, and the
+    // executed Run must match what the snapshot records (otherwise the snapshot documents
+    // limits the worker never applies). The legacy path below is the no-preset behavior.
+    const constraints: RunConstraints = resolvedWorkflow
+      ? resolvedWorkflow.constraints
+      : presetSnapshot
+      ? presetSnapshot.effectiveConstraints
+      : {
+        maxDurationMs: input.constraints?.maxDurationMs ?? this.deps.defaultMaxDurationMs,
+        maxRetries: input.constraints?.maxRetries ?? this.deps.defaultMaxRetries,
+        // Absolute deadline that counts queue time (#731); inherited verbatim by retries.
+        notAfter: input.constraints?.notAfter,
+        // Bot attribution hint (dispatcher-bot-design §4.3); recorded verbatim, never enforced.
+        botTask: input.constraints?.botTask,
+        budgetTokens: input.constraints?.budgetTokens,
+        budgetCost: input.constraints?.budgetCost,
+        resourceLimits: input.constraints?.resourceLimits,
+        allowedNetworks: input.constraints?.allowedNetworks,
+      };
+
+    // `repository` is the primary (the workspace checks it out); `repositories`
+    // holds additional repos cloned under workspace/repos/. When only the list
+    // form is given, its first entry is the primary.
+    const repositories = input.repositories && input.repositories.length > 0
+      ? input.repositories
+      : undefined;
+    const repository = input.repository ?? (repositories?.[0] ?? {});
+
+    // Credential profile resolution (CP-3, issue #807, design §5.4). AFTER `repository` is
+    // settled (the primary is the first list entry when only the list form is given), BEFORE
+    // anything is written: a refusal must leave no Run row, no event, no skill snapshot.
+    //
+    // Resolved against the REDACTED repository objects that are about to be stored, computed
+    // HERE so resolution and persistence read the same bytes: the claim-time re-check
+    // (worker.ts) re-resolves the stored objects, so resolving the raw URLs at creation and
+    // redacted ones at claim could make an unchanged file look like a parity violation
+    // (Copilot review round 1 on #841). A redaction that mangles a URL into an unnormalizable
+    // shape yields no id on BOTH sides (resolveProfile skips it), so the Run consistently
+    // resolves to no profile rather than flapping. Refusals carry the profile NAME and the
+    // reason (§5.4) — never the file's contents, env names or file paths: a caller who may not
+    // use a profile learns nothing about it.
+    const safeTask = this.deps.redactor ? this.deps.redactor.redact(input.task) : input.task;
+    const safeRepository = this.deps.redactor ? this.deps.redactor.redactJson(repository) as RepositoryContext : repository;
+    const safeRepositories = this.deps.redactor && repositories ? this.deps.redactor.redactJson(repositories) as RepositoryContext[] : repositories;
+    let credentialProfile: string | null = null;
+    if (this.deps.credentialProfiles) {
+      const resolution = this.resolveCredentialProfile(
+        [safeRepository, ...(safeRepositories ?? [])],
+        input.ownerId,
+      );
+      if (resolution.outcome === 'refused') {
+        throw new ForbiddenError(resolution.message);
+      }
+      if (resolution.outcome === 'profile') {
+        credentialProfile = resolution.name;
+      }
+      // Resume parity against the SAME read that produced `credentialProfile` (retry only):
+      // the retry must never persist a profile other than what the parent was created under.
+      if (input.retryCredentialProfile !== undefined && credentialProfile !== input.retryCredentialProfile) {
+        throw new ConflictError(
+          'credential profile changed since creation'
+          + ` (created under ${input.retryCredentialProfile ? `'${input.retryCredentialProfile}'` : 'no profile'},`
+          + ` now ${credentialProfile ? `'${credentialProfile}'` : 'no profile'});`
+          + ' create a new Run instead of retrying under a changed identity',
+        );
+      }
+    }
+
+    // Whether this Run gets a pack, and whether asking for one is even possible on this agent.
+    //
+    // The asymmetry is deliberate and comes from section 7.4. Ingest fails OPEN: an agent whose ability
+    // to receive a pack is unverified simply gets no pack, because an unknown harness version must not
+    // brick a Run. `require: true` fails CLOSED: a caller who asked for the pack and did not get it was
+    // given something other than what they asked for, and silence is the wrong way to report that.
+    const knowledgeDeps = this.deps.knowledge;
+    const wantsPack = knowledgeDeps !== undefined
+      && (knowledgeRequest?.enabled ?? knowledgeDeps.injectByDefault);
+    const knowledgeCap = knowledgeDeps ? knowledgeDeps.capabilities?.()[agent]?.static?.knowledge : undefined;
+    if (knowledgeRequest?.require && !wantsPack) {
+      throw new ValidationError(
+        knowledgeCapabilityMessage(agent, knowledgeDeps
+          ? 'injection is disabled for this host and knowledge.enabled was false'
+          : 'knowledge is not configured on this server'),
+      );
+    }
+    if (knowledgeRequest?.require && knowledgeCap === false) {
+      throw new ValidationError(knowledgeCapabilityMessage(agent, 'the adapter does not declare knowledge support'));
+    }
+    return {
+      safeTask,
+      safeRepository,
+      safeRepositories,
+      repository,
+      repositories,
+      agent,
+      model,
+      constraints,
+      credentialProfile,
+      resolved,
+      presetSnapshot,
+      resolvedWorkflow,
+      selection,
+      goalState,
+      wantsPack,
+      knowledgeDeps,
+      knowledgeRequest,
+    };
   }
 
   get(runId: string, ownerId: string, isAdmin: boolean): Run | null {
@@ -1911,111 +1965,4 @@ export class RetryClaimedError extends Error {
 
 function isUniqueViolation(err: unknown): boolean {
   return err instanceof Error && /UNIQUE constraint failed/.test(err.message);
-}
-
-const NUMERIC_CONSTRAINT_KEYS = ['maxDurationMs', 'maxRetries', 'budgetTokens', 'budgetCost'] as const;
-const CONSTRAINT_KEYS = new Set(['maxDurationMs', 'maxRetries', 'budgetTokens', 'budgetCost', 'resourceLimits', 'allowedNetworks', 'notAfter', 'botTask']);
-
-// Renamed by issue #63 because max* implied enforcement that does not exist. Rejecting them with a
-// migration message (rather than the generic "Unknown constraint") is deliberate: a stale client
-// would otherwise get an error that names neither the new spelling nor the reason.
-const RENAMED_CONSTRAINTS: Record<string, string> = Object.assign(Object.create(null), {
-  maxTokens: 'budgetTokens',
-  maxCost: 'budgetCost',
-});
-
-/** Validate a client-supplied constraints object (issue #28). */
-function validateConstraints(c: Record<string, unknown>): void {
-  for (const key of Object.keys(c)) {
-    // Object.hasOwn, not a bare index: a plain object literal inherits from Object.prototype, so
-    // `RENAMED_CONSTRAINTS['toString']` returns the toString FUNCTION, which is truthy. A client
-    // sending `{ toString: 1 }` would then get "constraint toString was renamed to function
-    // toString() { [native code] }..." instead of the correct "Unknown constraint: toString".
-    // Verified against node: toString, constructor, valueOf, hasOwnProperty and __proto__ all
-    // resolve to something truthy through the prototype chain.
-    const renamed = Object.hasOwn(RENAMED_CONSTRAINTS, key) ? RENAMED_CONSTRAINTS[key] : undefined;
-    if (renamed) {
-      throw new ValidationError(
-        `constraint ${key} was renamed to ${renamed}: it is recorded but not enforced, so the ` +
-        `max* name implied a guarantee that does not exist`,
-      );
-    }
-    if (!CONSTRAINT_KEYS.has(key)) {
-      throw new ValidationError(`Unknown constraint: ${key}`);
-    }
-  }
-  for (const key of NUMERIC_CONSTRAINT_KEYS) {
-    const v = c[key];
-    if (v === undefined) continue;
-    // budgetCost is a money amount, so fractional values are the normal case: `budgetCost: 2.5`
-    // means two dollars and fifty cents. Requiring an integer here made the field unable to
-    // express any non-whole budget, rejecting exactly the values it exists to accept. The other
-    // three are genuine counts/durations and stay integer-only.
-    const integral = key !== 'budgetCost';
-    if (typeof v !== 'number' || !Number.isFinite(v) || (integral && !Number.isInteger(v))) {
-      throw new ValidationError(`constraint ${key} must be a finite ${integral ? 'integer' : 'number'}`);
-    }
-    if (v < 0) {
-      throw new ValidationError(`constraint ${key} must be >= 0`);
-    }
-    if (v > Number.MAX_SAFE_INTEGER) {
-      throw new ValidationError(`constraint ${key} must be <= ${Number.MAX_SAFE_INTEGER}`);
-    }
-  }
-  const rl = c.resourceLimits;
-  if (rl !== undefined) {
-    if (typeof rl !== 'object' || rl === null || Array.isArray(rl)) {
-      throw new ValidationError('constraint resourceLimits must be an object');
-    }
-    for (const [k, v] of Object.entries(rl)) {
-      if (!['cpu', 'memory', 'disk'].includes(k)) {
-        throw new ValidationError(`Unknown resourceLimits key: ${k}`);
-      }
-      if (typeof v !== 'string') {
-        throw new ValidationError(`resourceLimits.${k} must be a string`);
-      }
-      // Section 3.3: malformed values are rejected BEFORE the Run is inserted, not at container
-      // start where they first fail. The parsers mirror what the sandbox manager passes to
-      // docker/podman (#725).
-      if (k === 'cpu' && parseCpuLimit(v) === null) {
-        throw new ValidationError(`resourceLimits.cpu ${JSON.stringify(v)} is not a positive decimal (e.g. "1.5")`);
-      }
-      if (k !== 'cpu' && parseByteLimit(v) === null) {
-        throw new ValidationError(`resourceLimits.${k} ${JSON.stringify(v)} is not a positive integer with an optional b/k/m/g suffix (e.g. "512m")`);
-      }
-    }
-  }
-  const an = c.allowedNetworks;
-  if (an !== undefined) {
-    if (!Array.isArray(an) || an.some((x) => typeof x !== 'string')) {
-      throw new ValidationError('constraint allowedNetworks must be an array of strings');
-    }
-  }
-  const bt = c.botTask;
-  if (bt !== undefined) {
-    // A recorded-only hint (§4.3), but the bot's singleFlight groups Runs by it, so constrain it
-    // to the same task-name vocabulary the bot config enforces (keys.ts dispatchKey). Anything
-    // else would let two different tasks collide under one hint.
-    if (typeof bt !== 'string' || !/^[a-z0-9-]+$/.test(bt)) {
-      throw new ValidationError('constraint botTask must be a string matching ^[a-z0-9-]+$');
-    }
-  }
-  const na = c.notAfter;
-  if (na !== undefined) {
-    // An ABSOLUTE deadline must name its offset: a timezone-less '2026-01-01T00:00:00' parses via
-    // Date.parse as server-local time, so the same config string means different instants on
-    // different hosts. Require an explicit Z or ±hh:mm offset and parse once.
-    if (
-      typeof na !== 'string'
-      || !/^(?:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)(?:Z|[+-]\d{2}:\d{2})$/.test(na)
-      || Number.isNaN(Date.parse(na))
-    ) {
-      throw new ValidationError('constraint notAfter must be an ISO-8601 timestamp with an explicit UTC offset (Z or ±hh:mm)');
-    }
-    // Must be in the future AT CREATION: a deadline already passed would make the Run
-    // unstartable by construction, which is a caller mistake, not a queue state (#731).
-    if (Date.parse(na) <= Date.now()) {
-      throw new ValidationError('constraint notAfter must be in the future');
-    }
-  }
 }

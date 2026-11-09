@@ -182,6 +182,27 @@ test('a non-string workflowVersion reaches strict validation instead of being dr
   }
 });
 
+test('a non-string task is 400 `task is required`, not a 500, on the workflow route (#989 round 2)', async () => {
+  // Same pre-replay guard as POST /api/runs: a numeric task must reach the validator's message,
+  // not a TypeError from .trim() answered as 500.
+  const repo = makeGitRepo(tempDir('mercury-repo-'));
+  const env = makeEnv({ workspaceMode: 'copy', repoDir: repo, workerEnabled: false });
+  const api = makeApi(env);
+  const { url, close: stopSrv } = await listen(api.app);
+  try {
+    const bad = await fetch(`${url}/api/workflows/plan-implement-review/runs`, {
+      method: 'POST', headers: auth('tok-alice'),
+      body: JSON.stringify({ task: 123, repository: { localPath: repo } }),
+    });
+    assert.equal(bad.status, 400, 'a non-string task is a client error, not a server error');
+    assert.match(((await bad.json()) as { error: string }).error, /task is required/);
+  } finally {
+    await stopSrv();
+    api.close();
+    env.close();
+  }
+});
+
 test('POST /api/workflows/:id/runs creates the Run through the W-2 path (same snapshot hash)', async () => {
   const repo = makeGitRepo(tempDir('mercury-repo-'));
   const env = makeEnv({ workspaceMode: 'copy', repoDir: repo, workerEnabled: false });
