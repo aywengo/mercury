@@ -825,6 +825,30 @@ test('cancelling a terminal run is 409, and a bad payload is still 400 (issue #6
   }
 });
 
+test('a non-string task is 400 `task is required`, not a 500, on POST /api/runs (#989 round 2)', async () => {
+  // The key check lets `{"task":123}` through the boundary (123 is a known key); without the
+  // type guard in admitCreateRequest's pre-replay check the .trim() throws a TypeError and the
+  // route answers 500 while the offline validator says `task is required`.
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const { app, close: closeStream } = makeApi(env);
+    const srv = await listen(app);
+    try {
+      const base = `http://127.0.0.1:${srv.port}`;
+      const auth = { authorization: 'Bearer tok-alice', 'content-type': 'application/json' };
+      const bad = await fetch(`${base}/api/runs`, {
+        method: 'POST', headers: auth, body: JSON.stringify({ task: 123, agent: 'fake' }),
+      });
+      assert.equal(bad.status, 400, 'a non-string task is a client error, not a server error');
+      assert.match(((await bad.json()) as { error: string }).error, /task is required/);
+    } finally {
+      await srv.close(); closeStream();
+    }
+  } finally {
+    env.close();
+  }
+});
+
 test('an unclassified internal failure returns 500 without leaking its message (issue #66)', async () => {
   // The leak was the more serious half of #66: the catch-all echoed err.message, so driver text
   // and absolute filesystem paths reached the browser. A throw nobody classified must say

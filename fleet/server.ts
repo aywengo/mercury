@@ -14,7 +14,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { HostRegistry, RegistryError, type HostView } from './registry.ts';
 import { BindingStore, UNKNOWN } from './bindings.ts';
 import { createChildClient } from './child.ts';
-import { DispatchError, recoverPending, refreshStates, submitRun, type DispatchDeps } from './dispatch.ts';
+import { DispatchError, recoverPending, refreshStates, stripChildRoutingFields, submitRun, type DispatchDeps } from './dispatch.ts';
 import { startSweeper, type SweeperHandle, type SweepEvent } from './sweep.ts';
 import { listMirroredEvents, type EventMirrorDeps } from './events.ts';
 import { startEventStream } from './stream.ts';
@@ -409,14 +409,13 @@ export function buildRoutes(deps: FleetServerDeps): { routes: Route[]; prober: P
             hostId: decision.hostId, exclusions: decision.exclusions,
           });
         }
-        const requested: Record<string, unknown> = { ...b, ...(decision.repository ? { repository: decision.repository } : {}) };
+        // The routing fields are consumed by Fleet (pool filter, host placement, idempotency
+        // scoping) and must not reach the child: its closed-key check now refuses them as
+        // unknown keys (#989). stripChildRoutingFields is the one place they are removed --
+        // it also covers crash recovery re-sending a STORED pre-upgrade payload
+        // (fleet/dispatch.ts recoverPending).
+        const requested = stripChildRoutingFields({ ...b, ...(decision.repository ? { repository: decision.repository } : {}) });
         if (!decision.repository) delete requested.repository;
-        delete requested.host;
-        delete requested.idempotency;
-        // The pool filter is consumed by the router above; the child create request has no
-        // labels key. Before #989 the child dropped it silently, and its closed-set check now
-        // turns the forward into an unknown-key 400 on every labelled submission.
-        delete requested.labels;
         const idem = typeof b.idempotency === 'string' && b.idempotency
           ? b.idempotency
           : headerIdempotency(ctx);

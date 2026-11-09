@@ -812,7 +812,11 @@ export class RunService {
    * a worker would pick up.
    */
   admitCreateRequest(input: CreateRunInput): CreateAdmission | { replayed: Run } {
-    if (!input.task || input.task.trim().length === 0) {
+    // The type guard is part of the check, not a formality: a non-string task (a 123 the JSON
+    // boundary lets through) has no .trim(), and without it this line is a TypeError that both
+    // create routes answer 500 with while the offline validator says `task is required` (#989
+    // round 2). The shared validator below runs the same check a second time, after replay.
+    if (typeof input.task !== 'string' || !input.task || input.task.trim().length === 0) {
       throw new ValidationError('task is required');
     }
     if (input.constraints) validateConstraints(input.constraints);
