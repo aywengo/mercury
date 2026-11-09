@@ -13,8 +13,13 @@
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { suggestionFor } from '../../domain/suggestKey.ts';
+import { findServerStampedField, serverStampedFieldMessage } from '../../api/serverStampedFields.ts';
+import { validateCreateRequest } from '../../domain/createRequest.ts';
 import { parseCron, parseTz } from './cron.ts';
 import { readBotCredentials } from './credentials.ts';
+import { resolveTemplate } from './scheduler.ts';
+import { nextFires } from './status.ts';
 
 /** The alias regex (§4.1): filesystem-safe, systemd-unit-safe, stable in log lines and owner ids. */
 export const BOT_ALIAS_RE = /^[a-z][a-z0-9-]{0,31}$/;
@@ -44,40 +49,6 @@ const TASK_KEYS = [
  *  reserved refusal so a config written today is accepted by L1 unchanged (#826). */
 const SELECT_MODES = ['shadow', 'enforce'] as const;
 const MAX_SELECT_CANDIDATES = 12;
-
-/**
- * Nearest known key, for the unknown-key refusal. A small local levenshtein instead of an import:
- * the bot boundary test (§15 item 4) pins bot code to the API surface plus the redactor, so a
- * 15-line edit-distance here is cheaper than a dependency that would fail the guard.
- */
-function suggestionFor(key: string, known: readonly string[]): string | undefined {
-  const distance = (a: string, b: string): number => {
-    const dp = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array<number>(b.length).fill(0)]);
-    for (let j = 0; j <= b.length; j++) dp[0][j] = j;
-    for (let i = 1; i <= a.length; i++) {
-      for (let j = 1; j <= b.length; j++) {
-        dp[i][j] = Math.min(
-          dp[i - 1][j] + 1,
-          dp[i][j - 1] + 1,
-          dp[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1),
-        );
-      }
-    }
-    return dp[a.length][b.length];
-  };
-  let best: string | undefined;
-  let bestDistance = Infinity;
-  for (const candidate of known) {
-    const d = distance(key.toLowerCase(), candidate.toLowerCase());
-    if (d < bestDistance) {
-      bestDistance = d;
-      best = candidate;
-    }
-  }
-  // Same cap the config schema uses: past ~3 edits it is a different key, not a typo.
-  if (best === undefined || bestDistance > Math.max(2, Math.floor(best.length / 4))) return undefined;
-  return best;
-}
 
 function refuse(path: string, field: string, message: string): never {
   throw new Error(`${path}: ${field}: ${message}`);
@@ -357,4 +328,85 @@ export function loadBotConfig(alias: string, env: NodeJS.ProcessEnv = process.en
     tasks,
     warnings,
   };
+}
+
+/**
+ * One bot's task-template validation result for `host bot validate` (A0-5, #989).
+ */
+export interface BotTemplateValidation {
+  /** One line per validated task (printed as `template ok`). */
+  ok: string[];
+  /** One line per refused task (printed as `template FAIL`, exit 1). */
+  findings: string[];
+  /** One line per task whose deadline could not be checked (printed as `template warn`). */
+  warnings: string[];
+}
+
+/**
+ * Validate every task template the way the SCHEDULER will post it (A0-5, #989): the resolved
+ * template -- `{{fire.*}}` filled from the task's NEXT scheduled fire (status.ts nextFires, the
+ * same source `host bot status` renders; `notAfterAt` becomes `constraints.notAfter` on that
+ * fire's date, and the dispatch-time `botTask` hint and constraint defaults applied) -- through
+ * the SAME validateCreateRequest POST /api/runs uses, plus the #785 rule (a template must name
+ * a repository) and the stamped-field refusal the route applies at fire time.
+ *
+ * A template that would 400 on every fire is a validate finding, not a failed night: night 1 of
+ * #742 dispatched 20 Runs that all failed at workspace setup because a template had no
+ * `repository` and nothing checked templates against the create model.
+ */
+export function validateBotTemplates(cfg: BotConfig, nowMs: number = Date.now()): BotTemplateValidation {
+  const ok: string[] = [];
+  const findings: string[] = [];
+  const warnings: string[] = [];
+  const next = new Map(nextFires(cfg, nowMs).map((nf) => [nf.task, nf]));
+  for (const task of cfg.tasks) {
+    const field = `schedule.tasks[${task.name}].template`;
+    const fire = next.get(task.name);
+    let body: Record<string, unknown>;
+    if (fire === undefined || Number.isNaN(fire.fireMs)) {
+      // The cron cannot fire within the 24h horizon: the placeholders and notAfterAt cannot be
+      // resolved at a real fire. Validate everything else, strip the bot helper, and say the
+      // deadline check did not run -- a schedule that never fires is a warning, not a refusal.
+      body = { ...task.template };
+      delete body.notAfterAt;
+      warnings.push(`${field}: no fire within 24h; notAfterAt not checked`);
+    } else {
+      // The same wall-minute derivation the dispatch loop uses (scheduler.ts): date and time
+      // are slices of the scheduled wall-minute id, in the task's zone.
+      const tzParts = {
+        date: fire.wallMinute.slice(1, 11),
+        time: fire.wallMinute.slice(12, 17),
+        iso: fire.wallMinute,
+      };
+      body = resolveTemplate(task, tzParts);
+    }
+    // The dispatch-time additions (scheduler.ts, section 4.3): the attribution hint and the
+    // constraint defaults the bot applies to EVERY dispatch. Validating the body the scheduler
+    // actually posts -- not the raw template -- is what makes the check measure a real fire.
+    const constraints = { ...((body.constraints as Record<string, unknown> | undefined) ?? {}) };
+    constraints.botTask = task.name;
+    if (constraints.maxDurationMs === undefined) constraints.maxDurationMs = 3_600_000;
+    if (constraints.maxRetries === undefined) constraints.maxRetries = 0;
+    body.constraints = constraints;
+    try {
+      const stamped = findServerStampedField(body);
+      if (stamped) throw new Error(serverStampedFieldMessage(stamped));
+      validateCreateRequest(body, { requireRepository: true });
+    } catch (err) {
+      findings.push(`${field}: ${(err as Error).message}`);
+      continue;
+    }
+    // The notAfter-in-the-future check above measures against NOW. A deadline that lies between
+    // now and the fire's own instant passes that check, yet 400s at every fire (the #785 class,
+    // one level down): a template whose deadline predates its first dispatch.
+    if (fire !== undefined && !Number.isNaN(fire.fireMs)) {
+      const na = constraints.notAfter;
+      if (typeof na === 'string' && !Number.isNaN(Date.parse(na)) && Date.parse(na) <= fire.fireMs) {
+        findings.push(`${field}: notAfter ${na} is in the past at the task's fire time (fires at ${new Date(fire.fireMs).toISOString()}); the Run would be unstartable`);
+        continue;
+      }
+    }
+    ok.push(task.name);
+  }
+  return { ok, findings, warnings };
 }

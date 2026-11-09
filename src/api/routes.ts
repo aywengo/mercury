@@ -8,6 +8,7 @@ import { PresetValidationFailure } from '../presets/presetRegistry.ts';
 import type { RunOriginKind, RunStatus } from '../domain/types.ts';
 import { RUN_ORIGIN_KINDS } from '../domain/types.ts';
 import { findServerStampedField, serverStampedFieldMessage } from './serverStampedFields.ts';
+import { validateCreateRequest } from '../domain/createRequest.ts';
 import { isTerminal } from '../domain/stateMachine.ts';
 import { requireAuth } from './auth.ts';
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from '../domain/errors.ts';
@@ -350,6 +351,12 @@ export function createRoutes(deps: RoutesDeps): Router {
       // (issue #988 acceptance 1). See src/api/serverStampedFields.ts.
       const stamped = findServerStampedField(body);
       if (stamped) throw new ValidationError(serverStampedFieldMessage(stamped));
+      // The body passes the SAME closed-set shape check RunService.create and the template
+      // validators (host a2a validate, host bot validate) use (A0-5, #989): a misspelled
+      // field is refused here instead of being ignored and the Run created without it
+      // (#785's failure mode at the body level). The service re-runs it on the named fields
+      // it receives, so in-process callers get the same rules.
+      validateCreateRequest(body);
       const run = deps.runService.create({
         ownerId: req.auth!.ownerId,
         task: body.task,

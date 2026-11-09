@@ -67,7 +67,8 @@ import { runHostProbe } from './host/probe.ts';
 import { envFilePath, runHostSetup } from './host/setup.ts';
 import { installService, serviceStatus, uninstallService, parseServiceArgs, type ServiceOptions } from './host/service.ts';
 import { loadEnvFile, runHostDoctor } from './host/doctor.ts';
-import { loadBotConfig, botConfigPath } from './host/bots/config.ts';
+import { loadBotConfig, botConfigPath, validateBotTemplates, BOT_ALIAS_RE, type BotConfig } from './host/bots/config.ts';
+import { loadExposedSkills, loadOneSkillById, skillFile, skillsDir } from './a2a/skills.ts';
 import { installBotService, uninstallBotService, reassignBotRuns, parseBotServiceInstallArgs, parseBotServiceUninstallArgs } from './host/bots/service.ts';
 import { runBot, makeSchedulerClient } from './host/bots/process.ts';
 import { dispatchTask } from './host/bots/dispatch.ts';
@@ -119,7 +120,12 @@ function usageText(): string {
     '                               readable; prints profile names and patterns, never values',
     '                bot validate --alias <a>   offline check of one bot: config parses and',
     '                               validates, credentials file is 0600 and has the alias, and',
-    '                               the two token copies agree (§4.2)',
+    '                               the two token copies agree (§4.2); every task template is',
+    '                               resolved and run through the create-request validator',
+    '                a2a validate [--skill <id>] offline check of the exposed-skill catalog',
+    '                               (a2a-design §6.2): each file validates and each template',
+    '                               goes through the create-request validator; exit 1 on any',
+    '                               invalid file',
     '                bot service install --alias <a>',
     '                                           install the per-bot launchd/systemd unit',
     '                               (--dry-run prints the unit); uninstall stops it and removes',
@@ -342,6 +348,57 @@ async function main(): Promise<void> {
     return;
   }
 
+  // `host a2a validate [--skill <id>]` — offline check of the exposed-skill catalog
+  // (docs/a2a-design.md section 6.2, A0-5 #989): every file parses and validates -- id
+  // discipline, closed shape, owners, the template through the SAME validateCreateRequest
+  // POST /api/runs uses, a repository naming a url or localPath. No API call, no database,
+  // no Run created; non-zero exit on any invalid file. Runs before loadConfig() like the
+  // other offline host commands: a host whose mercury.env is broken must still be able to
+  // diagnose its skills.
+  if (cmd === 'host' && args[0] === 'a2a' && args[1] === 'validate') {
+    const rest = args.slice(2);
+    let skill: string | undefined;
+    for (let i = 0; i < rest.length; i++) {
+      if (rest[i] === '--skill') {
+        skill = rest[i + 1];
+        i++;
+      } else if (rest[i]?.startsWith('--skill=')) {
+        skill = rest[i]!.slice('--skill='.length);
+      } else {
+        process.stderr.write(`host a2a validate: unknown argument '${redactUserInfo(rest[i])}'.\n`);
+        process.exitCode = 1;
+        return;
+      }
+    }
+    if (skill !== undefined) {
+      // One file: an id that violates the discipline is a refusal naming the regex, and a
+      // missing file is a finding, not a stack trace.
+      if (!BOT_ALIAS_RE.test(skill)) {
+        process.stdout.write(`skill ${skill}: id must match ${BOT_ALIAS_RE.source} (the bot-alias discipline, docs/a2a-design.md section 6.2)\n`);
+        process.exitCode = 1;
+        return;
+      }
+      const result = loadOneSkillById(skill);
+      if (typeof result === 'string') {
+        process.stdout.write(`skill ${skill}: ${result}\n`);
+        process.exitCode = 1;
+      } else {
+        process.stdout.write(`skill ok: ${skillFile(skill)}\n`);
+      }
+      return;
+    }
+    const load = loadExposedSkills();
+    if (load.skills.length === 0 && load.findings.length === 0) {
+      // No directory (or no *.json in it) is no catalog: A2A stays off (section 6.1), not an error.
+      process.stdout.write(`no skills found in ${skillsDir()}\n`);
+      return;
+    }
+    for (const s of load.skills) process.stdout.write(`skill ok: ${s.id}\n`);
+    for (const f of load.findings) process.stdout.write(`skill FAIL: ${f}\n`);
+    process.exitCode = load.findings.length > 0 ? 1 : 0;
+    return;
+  }
+
   if (cmd === 'host' && args[0] === 'bot' && args[1] === 'validate') {
     const rest = args.slice(2);
     let alias: string | undefined;
@@ -382,13 +439,27 @@ async function main(): Promise<void> {
       return process.env.MERCURY_API_TOKENS;
     };
     // Config.
+    let cfg: BotConfig | undefined;
     try {
-      const cfg = loadBotConfig(alias);
+      cfg = loadBotConfig(alias);
       process.stdout.write(`config ok: ${botConfigPath(alias)} (${cfg.tasks.length} task${cfg.tasks.length === 1 ? '' : 's'})\n`);
       for (const w of cfg.warnings) process.stdout.write(`config warn: ${w}\n`);
     } catch (err) {
       process.stdout.write(`config FAIL: ${(err as Error).message}\n`);
       failed = true;
+    }
+    // Templates (A0-5, #989): each task's resolved template through the SAME validateCreateRequest
+    // POST /api/runs uses -- a template that would 400 on every fire is a validate finding, not a
+    // failed night (the #785 gap, closed for bots too). Skipped when the config itself failed to
+    // load: there are no templates to resolve.
+    if (cfg) {
+      const templates = validateBotTemplates(cfg);
+      for (const t of templates.ok) process.stdout.write(`template ok: ${t}\n`);
+      for (const w of templates.warnings) process.stdout.write(`template warn: ${w}\n`);
+      for (const f of templates.findings) {
+        process.stdout.write(`template FAIL: ${f}\n`);
+        failed = true;
+      }
     }
     // Credentials.
     let token: string | undefined;
