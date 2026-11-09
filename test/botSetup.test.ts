@@ -11,7 +11,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { tempDir } from './helpers.ts';
-import { botConfigPath, loadBotConfig, botsDir } from '../src/host/bots/config.ts';
+import { botConfigPath, loadBotConfig, botsDir, validateBotTemplates } from '../src/host/bots/config.ts';
 import { apiTokenForOwner, botCredentialsPath, readBotCredentials, registeredOwnerForToken } from '../src/host/bots/credentials.ts';
 import {
   BLAST_RADIUS_SENTENCE,
@@ -48,7 +48,7 @@ function writeCredentials(dir: string, json: unknown, mode = 0o600): void {
 
 test('starter config passes the B0-5 validator unchanged', () => {
   const { env, dir } = botEnv();
-  const cfg = starterBotConfig('maint', 'primeagent');
+  const cfg = starterBotConfig('maint', 'primeagent', 'https://example.com/maint.git');
   mkdirSync(botsDir(env), { recursive: true });
   writeFileSync(botConfigPath('maint', env), JSON.stringify(cfg));
   const loaded = loadBotConfig('maint', env);
@@ -57,6 +57,24 @@ test('starter config passes the B0-5 validator unchanged', () => {
   assert.equal(loaded.tasks[0]!.template.agent, 'primeagent');
   assert.deepEqual(loaded.warnings, []);
   assert.ok(existsSync(join(dir, 'mercury', 'bots', 'maint.json')));
+});
+
+test('starter config: the template carries the operator\'s repository in the create model\'s form (A0-5)', () => {
+  const tpl = (repo: string) =>
+    (starterBotConfig('maint', 'primeagent', repo).schedule as { tasks: Array<{ template: Record<string, unknown> }> }).tasks[0]!.template;
+  assert.deepEqual(tpl('https://example.com/maint.git').repository, { url: 'https://example.com/maint.git' });
+  assert.deepEqual(tpl('HTTPS://example.com/maint.git').repository, { url: 'HTTPS://example.com/maint.git' });
+  assert.deepEqual(tpl('git@example.com:aywengo/maint.git').repository, { url: 'git@example.com:aywengo/maint.git' });
+  assert.deepEqual(tpl('/srv/repos/maint').repository, { localPath: '/srv/repos/maint' });
+});
+
+test('starter config: a local-path repository passes the shared template validator (A0-5, #785)', () => {
+  const { env } = botEnv();
+  mkdirSync(botsDir(env), { recursive: true });
+  writeFileSync(botConfigPath('maint', env), JSON.stringify(starterBotConfig('maint', 'primeagent', '/srv/repos/maint')));
+  const result = validateBotTemplates(loadBotConfig('maint', env));
+  assert.deepEqual(result.findings, []);
+  assert.deepEqual(result.ok, ['maintenance']);
 });
 
 test('generateBotToken: tok-bot-<alias>- prefix, 32 hex chars, unique', () => {
@@ -69,7 +87,7 @@ test('generateBotToken: tok-bot-<alias>- prefix, 32 hex chars, unique', () => {
 
 test('plan: a fresh host generates one token for both copies', () => {
   const { env } = botEnv();
-  const plan = planBotProvision({ alias: 'maint', harness: 'primeagent', posture: 'scheduler', env, apiTokensRaw: undefined });
+  const plan = planBotProvision({ alias: 'maint', harness: 'primeagent', repository: 'https://example.com/maint.git', posture: 'scheduler', env, apiTokensRaw: undefined });
   assert.equal(plan.tokenSource, 'generated');
   assert.equal(plan.configAction, 'write');
   assert.equal(plan.credentialsAction, 'write');
@@ -81,7 +99,7 @@ test('plan: a fresh host generates one token for both copies', () => {
 test('plan: an existing credentials token is reused and registered in the env copy', () => {
   const { env } = botEnv();
   writeCredentials(env.XDG_CONFIG_HOME!, { maint: { api: 'tok-bot-maint-existing' } });
-  const plan = planBotProvision({ alias: 'maint', harness: 'primeagent', posture: 'scheduler', env, apiTokensRaw: 'tok-alice:alice' });
+  const plan = planBotProvision({ alias: 'maint', harness: 'primeagent', posture: 'scheduler', env, repository: 'https://example.com/maint.git', apiTokensRaw: 'tok-alice:alice' });
   assert.equal(plan.token, 'tok-bot-maint-existing');
   assert.equal(plan.tokenSource, 'credentials');
   assert.equal(plan.credentialsAction, 'unchanged');
@@ -90,7 +108,7 @@ test('plan: an existing credentials token is reused and registered in the env co
 
 test('plan: an env-registered token installs the missing credentials copy', () => {
   const { env } = botEnv();
-  const plan = planBotProvision({ alias: 'maint', harness: 'primeagent', posture: 'scheduler', env, apiTokensRaw: 'tok-bot-maint-from-env:bot-maint' });
+  const plan = planBotProvision({ alias: 'maint', harness: 'primeagent', posture: 'scheduler', env, repository: 'https://example.com/maint.git', apiTokensRaw: 'tok-bot-maint-from-env:bot-maint' });
   assert.equal(plan.token, 'tok-bot-maint-from-env');
   assert.equal(plan.tokenSource, 'env');
   assert.equal(plan.credentialsAction, 'write');
@@ -100,7 +118,7 @@ test('plan: two copies that already disagree are refused by name, without echoin
   const { env } = botEnv();
   writeCredentials(env.XDG_CONFIG_HOME!, { maint: { api: 'tok-bot-maint-aaaa' } });
   assert.throws(
-    () => planBotProvision({ alias: 'maint', harness: 'primeagent', posture: 'scheduler', env, apiTokensRaw: 'tok-bot-maint-bbbb:bot-maint' }),
+    () => planBotProvision({ alias: 'maint', harness: 'primeagent', repository: 'https://example.com/maint.git', posture: 'scheduler', env, apiTokensRaw: 'tok-bot-maint-bbbb:bot-maint' }),
     (err: Error) => {
       assert.match(err.message, /hold different tokens for bot-maint/);
       assert.match(err.message, /bot-credentials\.json/);
@@ -113,14 +131,14 @@ test('plan: two copies that already disagree are refused by name, without echoin
 
 test('plan: an existing config is kept, never overwritten', () => {
   const { env } = botEnv();
-  const plan = planBotProvision({ alias: 'maint', harness: 'primeagent', posture: 'scheduler', env, apiTokensRaw: undefined, configExists: true });
+  const plan = planBotProvision({ alias: 'maint', harness: 'primeagent', posture: 'scheduler', env, repository: 'https://example.com/maint.git', apiTokensRaw: undefined, configExists: true });
   assert.equal(plan.configAction, 'keep');
 });
 
 test('write: config and credentials land 0600, other aliases preserved', () => {
   const { env } = botEnv();
   writeCredentials(env.XDG_CONFIG_HOME!, { nightly: { api: 'tok-nightly' } });
-  const plan = planBotProvision({ alias: 'maint', harness: 'hermes', posture: 'scheduler', env, apiTokensRaw: undefined });
+  const plan = planBotProvision({ alias: 'maint', harness: 'hermes', repository: 'https://example.com/maint.git', posture: 'scheduler', env, apiTokensRaw: undefined });
   writeBotProvision(plan, env);
   const cfgPath = botConfigPath('maint', env);
   assert.equal(statSync(cfgPath).mode & 0o777, 0o600);
@@ -137,14 +155,14 @@ test('write: an existing config file is left byte-for-byte intact', () => {
   mkdirSync(botsDir(env), { recursive: true });
   const edited = '{"description":"hand-edited","schedule":{"tasks":[{"name":"x","cron":"0 4 * * *","template":{"task":"t"}}]}}';
   writeFileSync(botConfigPath('maint', env), edited);
-  const plan = planBotProvision({ alias: 'maint', harness: 'primeagent', posture: 'scheduler', env, apiTokensRaw: undefined });
+  const plan = planBotProvision({ alias: 'maint', harness: 'primeagent', repository: 'https://example.com/maint.git', posture: 'scheduler', env, apiTokensRaw: undefined });
   writeBotProvision(plan, env);
   assert.equal(readFileSync(botConfigPath('maint', env), 'utf8'), edited);
 });
 
 test('summary never carries the token value', () => {
   const { env } = botEnv();
-  const plan = planBotProvision({ alias: 'maint', harness: 'primeagent', posture: 'scheduler', env, apiTokensRaw: undefined });
+  const plan = planBotProvision({ alias: 'maint', harness: 'primeagent', repository: 'https://example.com/maint.git', posture: 'scheduler', env, apiTokensRaw: undefined });
   const summary = botProvisionSummary(plan);
   assert.ok(summary.includes(`<set, ${plan.token.length} chars>`));
   assert.ok(!summary.includes(plan.token));
@@ -161,7 +179,7 @@ test('validateAnswers: an untrusted harnesses value with the bots step on is an 
     hostName: 'h', dataDir: '/d', workspaceDir: '/w', retentionDays: 7, adminToken: 'a'.repeat(64),
     atlasEnabled: false, atlasUrl: '', atlasToken: '', atlasProject: '', bindHost: '',
     harnesses: 42, layaEnabled: false, layaUrl: '',
-    botEnabled: true, botAlias: 'maint', botHarness: 'primeagent', botPosture: 'scheduler',
+    botEnabled: true, botAlias: 'maint', botHarness: 'primeagent', botRepository: 'https://example.com/maint.git', botPosture: 'scheduler',
   } as unknown as HostSetupAnswers;
   const errors = validateAnswers(a);
   assert.ok(errors.some((e) => e.startsWith('harnesses:')), errors.join('; '));
@@ -178,6 +196,7 @@ function answersFileFor(dir: string, over: Record<string, unknown> = {}): string
     botEnabled: true,
     botAlias: 'maint',
     botHarness: 'primeagent',
+    botRepository: 'https://example.com/maint.git',
     ...over,
   }));
   return p;
@@ -284,7 +303,7 @@ test('the wizard\'s own next command works: `host bot validate` reads mercury.en
   const { env, dir } = botEnv();
   mkdirSync(join(dir, 'mercury', 'bots'), { recursive: true });
   const token = 'tok-bot-maint-0123456789abcdef0123456789abcdef';
-  writeFileSync(botConfigPath('maint', env), JSON.stringify(starterBotConfig('maint', 'primeagent')));
+  writeFileSync(botConfigPath('maint', env), JSON.stringify(starterBotConfig('maint', 'primeagent', 'https://example.com/maint.git')));
   writeCredentials(dir, { maint: { api: token } });
   writeFileSync(envFilePath(env), `MERCURY_API_TOKENS=${token}:bot-maint\n`, { mode: 0o600 });
   const spawned = spawnSync(process.execPath, [join(ROOT, 'src', 'cli.ts'), 'host', 'bot', 'validate', '--alias', 'maint'], {

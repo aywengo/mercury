@@ -54,10 +54,53 @@ export function generateBotToken(alias: string): string {
 }
 
 /**
- * The starter config the wizard writes. It must pass `loadBotConfig` unchanged (the wizard may not
- * write a config `host bot validate` would reject), so it uses only the v1 scheduler fields.
+ * The repository answer the wizard collects: a URL (scheme form like `https://…`, or
+ * scp-style `git@host:org/repo.git`) becomes the template's `url`; anything else is a local
+ * checkout path and becomes its `localPath`. Both forms are exactly what the create model
+ * accepts (`requireTemplateRepository`, #785), so what the operator types is what the
+ * template carries — the wizard never writes a repository the create surface would read
+ * differently.
  */
-export function starterBotConfig(alias: string, harness: string): Record<string, unknown> {
+export function repositoryRef(value: string): { url?: string; localPath?: string } {
+  const s = value.trim();
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(s) || /^[\w.-]+@[\w.-]+:/.test(s)) {
+    return { url: s };
+  }
+  return { localPath: s };
+}
+
+/**
+ * The repository the existing starter config's template names, for the wizard's re-run default
+ * (A0-5, #989): a re-run must not force the operator to retype what the config already carries,
+ * the same continuity the admin token and bind host have. '' when the file is absent or
+ * unreadable — a fresh host, or a pre-A0-5 config written before templates named a repository,
+ * where the wizard prompts for one instead of inventing a default.
+ */
+export function existingStarterRepository(env: NodeJS.ProcessEnv): string {
+  const path = botConfigPath(DEFAULT_BOT_ALIAS, env);
+  if (!existsSync(path)) return '';
+  try {
+    const raw = JSON.parse(readFileSync(path, 'utf8')) as {
+      schedule?: { tasks?: Array<{ template?: { repository?: { url?: string; localPath?: string } } }> };
+    };
+    const repo = raw.schedule?.tasks?.[0]?.template?.repository;
+    return repo?.url ?? repo?.localPath ?? '';
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * The starter config the wizard writes. It must pass `loadBotConfig` unchanged (the wizard may not
+ * write a config `host bot validate` would reject), so it uses only the v1 scheduler fields. The
+ * template names the operator's repository (A0-5, #989): a template without one would 400 on
+ * every fire, and the #785 rule now refuses it at validate time.
+ */
+export function starterBotConfig(
+  alias: string,
+  harness: string,
+  repository: string,
+): Record<string, unknown> {
   if (!BOT_ALIAS_RE.test(alias)) {
     throw new Error(`bot alias must match ${BOT_ALIAS_RE.source}, got '${alias}'`);
   }
@@ -79,6 +122,7 @@ export function starterBotConfig(alias: string, harness: string): Record<string,
               'and report what you found. Do not modify files outside the workspace.',
             agent: harness,
             constraints: { maxDurationMs: 3_600_000, maxRetries: 0 },
+            repository: repositoryRef(repository),
           },
         },
       ],
@@ -89,6 +133,12 @@ export function starterBotConfig(alias: string, harness: string): Record<string,
 export interface BotProvisionInput {
   alias: string;
   harness: string;
+  /**
+   * The repository for the bot's Runs, as the operator typed it (a URL or a local
+   * path, A0-5 #989): the starter template must name one, and `host bot validate`
+   * refuses a config without it.
+   */
+  repository: string;
   posture: BotPosture;
   env: NodeJS.ProcessEnv;
   /** The MERCURY_API_TOKENS value the wizard is about to write (file value, else process env). */
@@ -155,7 +205,7 @@ export function planBotProvision(input: BotProvisionInput): BotProvisionPlan {
     tokenSource,
     configPath,
     configAction: configExists ? 'keep' : 'write',
-    config: starterBotConfig(alias, harness),
+    config: starterBotConfig(alias, harness, input.repository),
     credentialsPath,
     credentialsAction: credentialToken === token ? 'unchanged' : 'write',
     apiTokensValue: upsertBotTokenInApiTokens(input.apiTokensRaw, alias, token),
