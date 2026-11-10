@@ -128,6 +128,16 @@ One invalid preset does not hide valid presets. Registry list responses include
 invalid entries only when an authorized diagnostic caller explicitly requests
 them.
 
+CI lint (#868): the Node matrix in `.github/workflows/ci.yml` runs
+`test/builtinManifestLint.test.ts` as part of `npm test`, and that test lints
+every shipped preset with exactly these checks, so a typo in a committed
+manifest is a red build at commit time, not a structured finding at runtime.
+The same check is available locally as `mercury lint-manifests`: each stderr
+line is one `<file>: <code> <field>: <message>` finding, exit 1 on any
+finding. When it is red, fix the listed manifest — or, when the finding is a
+missing skill, add the skill under `.agents/skills/`. A red lint means the
+registry would reject the preset at runtime, not that CI is stricter.
+
 ## 3. Resolution semantics
 
 Resolution is deterministic. Given the same manifest, source bytes, caller
