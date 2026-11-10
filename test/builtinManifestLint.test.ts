@@ -117,6 +117,39 @@ test('malformed fixtures produce the exact findings and a non-zero exit', () => 
   }
 });
 
+test('a manifest under a directory the registry skips by id shape is a finding', () => {
+  const root = tempDir('mercury-lint-');
+  {
+    seedSkill(root, 'real-skill');
+    seedPreset(root, 'good-preset', validPreset('good-preset'));
+    seedWorkflow(root, 'good-wf', validWorkflow('good-wf', 'good-preset'));
+    // Discovery skips names that are not safe ids (stray protection), so these two
+    // manifests never reach a validator — but the directories HOLD manifests, so the
+    // guard must fail the build with the registry's own id refusal (the error a Run
+    // gets when it resolves the entry), and count both roots.
+    seedPreset(root, 'BadPreset', validPreset('BadPreset'));
+    seedWorkflow(root, 'BadTemplate', validWorkflow('BadTemplate', 'good-preset'));
+    // A skipped directory WITHOUT a manifest stays silent: it is stray, not a
+    // manifest (the rule both registries pin in listAll).
+    mkdirSync(join(root, 'presets', 'Stray-No-Manifest'), { recursive: true });
+    const report = lintBuiltinManifests({ rootDir: root });
+    assert.equal(report.valid, false);
+    assert.equal(report.presetsChecked, 2); // good-preset + BadPreset
+    assert.equal(report.workflowsChecked, 2); // good-wf + BadTemplate
+    assert.deepEqual(shape(report), [
+      ['preset', 'BadPreset', 'presets/BadPreset/preset.json', 'PRESET_LOAD_FAILED', '', 'Unsafe preset id: "BadPreset"'],
+      ['workflow', 'BadTemplate', 'workflows/BadTemplate/workflow.json', 'WORKFLOW_LOAD_FAILED', '', 'Unsafe workflow id: "BadTemplate"'],
+    ]);
+    const cli = formatBuiltinLint(report);
+    assert.equal(cli.exitCode, 1);
+    assert.deepEqual(cli.lines, [
+      'presets/BadPreset/preset.json: PRESET_LOAD_FAILED Unsafe preset id: "BadPreset"',
+      'workflows/BadTemplate/workflow.json: WORKFLOW_LOAD_FAILED Unsafe workflow id: "BadTemplate"',
+      'FAIL: 2 finding(s) in 2 builtin preset(s), 2 builtin workflow template(s)',
+    ]);
+  }
+});
+
 test('the shipped tree is clean: zero findings on the real builtin manifests', () => {
   // The default roots are the package's own presets/, workflows/ and .agents/skills/.
   // This is the guard the issue is about: a committed typo must be a red build here,
