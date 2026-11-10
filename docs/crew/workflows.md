@@ -156,6 +156,16 @@ Hard limits:
 `agent-declared` and `review-approved` are intentionally absent. An agent saying
 that its own work is approved is not an independent gate.
 
+CI lint (#868): the Node matrix in `.github/workflows/ci.yml` runs
+`test/builtinManifestLint.test.ts` as part of `npm test`, and that test lints
+every shipped workflow template with these schema checks, resolving
+`stage.preset` references against the preset registry, so a typo in a
+committed manifest is a red build at commit time, not a structured finding at
+runtime. The same check is available locally as `mercury lint-manifests`:
+each stderr line is one `<file>: <code> <field>: <message>` finding, exit 1 on
+any finding. When it is red, fix the listed manifest. A red lint means the
+registry would reject the template at runtime, not that CI is stricter.
+
 ## 5. Snapshot semantics
 
 Creating a workflow group resolves and snapshots:

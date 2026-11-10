@@ -60,6 +60,7 @@ import { SandboxManager } from './sandbox/sandboxManager.ts';
 import { Worker } from './worker/worker.ts';
 import { startServer } from './api/server.ts';
 import { dataPath } from './paths.ts';
+import { formatBuiltinLint, lintBuiltinManifests } from './manifests/lint.ts';
 import { PresetRegistry } from './presets/presetRegistry.ts';
 import { WorkflowRegistry } from './workflows/workflowRegistry.ts';
 import { runHostInstall } from './host/install.ts';
@@ -85,7 +86,7 @@ const SKILLS_DIR = dataPath('.agents', 'skills');
 // happen to hit.
 function usageText(): string {
   return [
-    'usage: mercury [--version|-V] [--help|-h] | <dev|server|worker|gc|migrate|redact-events|knowledge>',
+    'usage: mercury [--version|-V] [--help|-h] | <dev|server|worker|gc|migrate|redact-events|lint-manifests|knowledge>',
     '',
     '  dev             run the API and the worker in one process (development)',
     '  server          run the API only',
@@ -95,6 +96,9 @@ function usageText(): string {
     '  redact-events   retroactive secret redaction of events.payload_json,',
     '                  run_inputs.input_json, runs.error, runs.task,',
     '                  runs.repository_json, runs.repositories_json',
+    '  lint-manifests  validate every builtin preset and workflow manifest with the',
+    '                  registry validators (the CI guard, #868): one line per finding',
+    '                  on stderr, exit 1 on any finding',
     '  knowledge       index        parse docs/decisions/ at a checkout HEAD into the outbox,',
     '  knowledge       flush        push the knowledge outbox to Atlas now, synchronously,',
     '                               and print what happened (phase 1)',
@@ -604,6 +608,20 @@ async function main(): Promise<void> {
   if (cmd === 'host' && args[0] === 'bot') {
     process.stderr.write(`host bot: unknown subcommand '${args[1] ?? ''}'. Expected run, validate, dispatch, status or service.\n`);
     process.exitCode = 1;
+    return;
+  }
+  // `lint-manifests` runs before loadConfig() like the host fix tools: it checks the
+  // package's own shipped data files, so a checkout with no host configuration — or a
+  // broken one — must still be able to run it (the CI step runs on a bare checkout).
+  // Findings go to stderr, the clean summary to stdout, so a shell can capture either
+  // without mixing a success line into a failure report.
+  if (cmd === 'lint-manifests') {
+    const { exitCode, lines } = formatBuiltinLint(lintBuiltinManifests());
+    for (const line of lines) {
+      if (exitCode === 1) process.stderr.write(line + '\n');
+      else process.stdout.write(line + '\n');
+    }
+    process.exitCode = exitCode;
     return;
   }
   const config = loadConfig();
