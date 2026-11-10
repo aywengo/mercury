@@ -50,7 +50,7 @@
 
 import { basename } from 'node:path';
 import { readFileSync } from 'node:fs';
-import { REPO_RE, CLAIM_RELEASED_MARKER, ghToken, ghGet as ghGetRaw, ghGetText, ghPost as ghPostRaw, ghDelete as ghDeleteRaw, FETCH_TIMEOUT_MS } from './shared.ts';
+import { REPO_RE, CLAIM_RELEASED_MARKER, ghToken, ghGet as ghGetRaw, ghGetText, ghPost as ghPostRaw, ghDelete as ghDeleteRaw, FETCH_TIMEOUT_MS, loadRunLedger, localDateString } from './shared.ts';
 
 const TRUSTED_AUTHOR = 'aywengo';
 /** The hosted Copilot reviewer's exact login (aywengo/mercury reviews). Exact match everywhere:
@@ -844,6 +844,28 @@ async function nightlyCommentedSince(
   return path === null ? false : null; // a page cap with pages beyond: unknown
 }
 
+/**
+ * #1111: the local calendar dates BEFORE `tonight` on which a nightly-next Run claimed `issue`
+ * and ended without a terminal call (no finish, no blocked) — read from the run ledger that
+ * `next.ts` writes at claim time and at the terminal call. The acceptance criterion's "two
+ * nights" is "a dead night before tonight + tonight's dead claim": the claim the release path is
+ * judging is tonight's by construction. The ledger is the only record of what a previous night's
+ * Run did — a Run that died mid-worktree left nothing on GitHub to count. An empty or corrupt
+ * ledger yields [] (the release path then behaves exactly as before), so a lost state file can
+ * never trigger a block.
+ */
+export function priorDeadClaimNights(env: NodeJS.ProcessEnv, issue: number, tonight: string): string[] {
+  const nights = new Set<string>();
+  for (const e of loadRunLedger(env)) {
+    if (e.issue !== issue || e.terminal !== undefined) continue;
+    const d = Date.parse(e.claimedAt);
+    if (!Number.isFinite(d)) continue;
+    const night = localDateString(new Date(d));
+    if (night < tonight) nights.add(night);
+  }
+  return [...nights].sort();
+}
+
 /** The full pipeline over an INJECTED fetch-like transport (tests pass recordings; main passes ghGet/ghPost).
  * io.post returns true when the claim label was newly added, false when it was already present.
  * io.del returns true on 2xx and false when the label was absent (the stale-claim reset). */
@@ -1258,6 +1280,47 @@ export async function runSelectorWith(
         if (pendingReviewIssues.has(claim.number)) continue; // the Run opened a PR: it produced output
         const commented = await nightlyCommentedSince(io, repo, claim.number, claim.claimedAt);
         if (commented !== false) continue; // true = it commented; null = unreadable, keep the claim
+        // #1111: two nights of dead claims on the same issue is a repeated outcome, not a fluke.
+        // The release that would hand the issue to a third attempt is replaced by
+        // nightly:blocked with a short note, so the morning report surfaces it instead of the
+        // claim quietly cycling night after night.
+        const deadNights = priorDeadClaimNights(env, claim.number, localDateString());
+        if (deadNights.length > 0) {
+          if (!dryRun) {
+            if (!io.del) throw new Error('repeat-dead-claim block needs io.del; the injected transport lacks it');
+            // The blocked exit's write order: label FIRST (a crash between the writes still shows
+            // the blocked state), then the note the report reads back via its
+            // **Blocking question:** comment scan, then the claim removal.
+            try {
+              await io.post(`/repos/${repo}/issues/${claim.number}/labels`, { labels: [L_BLOCKED] });
+            } catch (e) {
+              // The label did not land: keep the claim excluded (it stays on the issue) and
+              // select the rest of the night.
+              console.error(`repeat-dead-claim block failed for #${claim.number}: ${String(e instanceof Error ? e.message : e)}`);
+              continue;
+            }
+            try {
+              await io.post(`/repos/${repo}/issues/${claim.number}/comments`, {
+                body: `The nightly stopped on this issue instead of asking (nightly Runs never ask, §4.4).\n\n**Blocking question:** A nightly-next Run claimed this issue on ${deadNights.length + 1} nights (${[...deadNights, localDateString()].join(', ')}) and each ended without opening a PR or commenting. The claim is not released for another attempt: a repeated outcome on this issue needs a human decision (#1111).`,
+              });
+            } catch (e) {
+              // The blocked label is already on: the report still lists the issue (it falls back
+              // to the last comment). Visibility over perfection.
+              console.error(`repeat-dead-claim block note failed for #${claim.number}: ${String(e instanceof Error ? e.message : e)}`);
+            }
+            try {
+              await io.del(`/repos/${repo}/issues/${claim.number}/labels/${encodeURIComponent(L_IN_PROGRESS)}`);
+            } catch (e) {
+              console.error(`repeat-dead-claim block: claim removal failed for #${claim.number}: ${String(e instanceof Error ? e.message : e)}`);
+            }
+          }
+          // Blocked (or, in a dry run, would be): the issue stays EXCLUDED. Unlike a release, a
+          // block must not make the issue selectable for the rest of the night, so the
+          // in-progress label stays in the candidate's view; the blocked label on the real issue
+          // excludes it from every later walk, and the §4.3 clock reset cannot undo the block at
+          // midnight because the claim label itself is removed above.
+          continue;
+        }
         if (!dryRun) {
           if (!io.del) throw new Error('claim release needs io.del; the injected transport lacks it');
           // Label FIRST, and its own failure path: the issue must become selectable even if the

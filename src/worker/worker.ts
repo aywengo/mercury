@@ -1574,12 +1574,46 @@ await this.finalize(run, outcome, skills);
 
     if (outcome.status === 'TIMED_OUT') {
       const reason = outcome.reason ?? 'max-duration';
+      // #1111: a Run stopped by its deadline that had committed work used to strand it in the
+      // worktree until GC: the terminal was recorded, the commits were not even read, and the
+      // branch never reached the remote, so the next Run restarted from zero. Compute the Run's
+      // commits (base..HEAD, the same range the COMPLETED path's unpushed record uses) and push
+      // the branch with the Run's own credentials, so the next Run can resume instead of
+      // restarting. The push is best effort by construction: any failure degrades to the
+      // unpushed-commits record below and never blocks the terminal state.
+      let stranded: { branch: string; commits: string[] } | null = null;
+      if (current.workspacePath) {
+        const commits = await this.deps.workspace.recordCommits(current.workspacePath);
+        stranded = await this.deps.workspace.unpushedCommits(
+          current.workspacePath,
+          commits,
+          current.workspaceBranch ?? `agent/${run.id}`,
+          current.repository.baseCommit,
+        );
+      }
+      const pushed = stranded && stranded.commits.length > 0 && current.workspacePath
+        ? await this.pushStrandedBranch(run, current.workspacePath, stranded)
+        : false;
       this.deps.runs.transition(run.id, 'TIMED_OUT', { completedAt: now });
       this.deps.events.append(run.id, 'run.timed_out', { runId: run.id, reason });
+      if (stranded && stranded.commits.length > 0) {
+        // Record the commits a stopped Run actually made: TIMED_OUT runs used to carry null,
+        // which read as "nothing happened" in exactly the failure mode this addresses.
+        this.deps.runs.setFinalCommits(run.id, stranded.commits, null);
+        if (!pushed) {
+          // The push needs the Run's credential profile; without one (or with a refused push)
+          // the branch stays local. Name it for the morning report, same event as the
+          // COMPLETED path.
+          this.deps.events.append(run.id, 'run.unpushed_commits', { branch: stranded.branch, commits: stranded.commits });
+        }
+      }
       log.warn({
         reason,
         maxDurationMs: run.constraints.maxDurationMs,
         inputTimeoutMs: this.deps.inputTimeoutMs,
+        ...(stranded && stranded.commits.length > 0
+          ? { strandedCommits: stranded.commits.length, pushed, branch: stranded.branch }
+          : {}),
         ...durations,
       }, 'run timed out');
       return;
@@ -1605,6 +1639,40 @@ await this.finalize(run, outcome, skills);
     });
     log.error({ error, errorKind, ...durations }, 'run failed');
     await this.maybeAutoRetry(run, retryDueAt);
+  }
+
+  /**
+   * #1111: push a deadline-stopped Run's committed branch with the Run's OWN credentials. The
+   * profile is resolved exactly the way drive() resolves it (same file, same Run, same function)
+   * and the environment is built by the same four-layer builder, so the push authenticates the
+   * way the agent's pushes did. No profile, or a refused resolution, means "push with nothing"
+   * -- never with someone else's credentials: the push simply fails and the caller records the
+   * branch in `run.unpushed_commits`. Best effort by construction: any failure returns false and
+   * the Run still gets its terminal state.
+   */
+  private async pushStrandedBranch(run: Run, workspacePath: string, stranded: { branch: string; commits: string[] }): Promise<boolean> {
+    const log = this.logger(run.id);
+    try {
+      let profile: CredentialProfile | null = null;
+      if (this.deps.credentialProfiles) {
+        const { profiles } = this.deps.credentialProfiles();
+        const resolution = resolveProfile(profiles, run.ownerId, [run.repository, ...(run.repositories ?? [])]);
+        if (resolution.outcome === 'profile') {
+          profile = profiles.find((p) => p.name === resolution.name) ?? null;
+        }
+      }
+      const pushDir = mkdtempSync(join(tmpdir(), 'mercury-push-env-'));
+      const built = buildRunEnvironment({ workerEnv: process.env, runDir: pushDir, profile });
+      const ok = await this.deps.workspace.pushBranch(workspacePath, stranded.branch, built.env);
+      if (!ok) {
+        log.warn({ branch: stranded.branch, profile: profile?.name ?? null },
+          'timed-out run: push of committed work failed; the branch is recorded as unpushed');
+      }
+      return ok;
+    } catch (err) {
+      log.warn({ err: String(err) }, 'timed-out run: push of committed work could not be attempted');
+      return false;
+    }
   }
 
   /**

@@ -1,6 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 
+import { tempDir } from './helpers.ts';
 import {
   isExcluded,
   isTrusted,
@@ -2308,4 +2311,131 @@ test('#1015: an unreadable PR detail fails the conflict signal closed (no resume
   const s = await runSelectorWith(conflictIo({ detailError: true }) as never, { REPO: 'aywengo/mercury' }, true);
   assert.notEqual(s.rung, 0, 'an unreadable detail response cannot establish a conflict');
   assert.notEqual(s.issue, 965, 'the open PR still reserves the issue from new work');
+});
+
+// ---- #1111: two nights of dead claims on the same issue block instead of release ----
+// The third night's Run should not be handed an issue whose claim already died twice: the
+// selector marks it nightly:blocked with a short note (the report's Blocked section reads the
+// **Blocking question:** line) instead of releasing it for a third attempt.
+
+/** A temp XDG_STATE_HOME holding a run ledger (the shape next.ts writes). */
+function ledgerHome(entries: unknown[]): { env: NodeJS.ProcessEnv; close: () => void } {
+  const dir = tempDir('mercury-1111-ledger-');
+  const path = join(dir, 'mercury', 'nightly');
+  mkdirSync(path, { recursive: true });
+  writeFileSync(join(path, 'run-ledger.json'), JSON.stringify(entries, null, 2));
+  return { env: { XDG_STATE_HOME: dir }, close: () => rmSync(dir, { recursive: true, force: true }) };
+}
+
+/** ISO instant N hours before now, for the "prior night" half of the two-night rule. */
+const hoursAgo = (h: number): string => new Date(Date.now() - h * 3_600_000).toISOString();
+
+/** The io a block test needs, plus (path, body) capture so the LABEL and the NOTE are
+ * distinguishable from the release path's writes. */
+function blockIo(opts: {
+  issue: GhIssue;
+  claimEvent: LabelEvent;
+  dels: string[];
+  posts: { path: string; body: unknown }[];
+}) {
+  return {
+    async get(path: string) {
+      if (path.includes('/timeline')) return { body: [opts.claimEvent], link: null };
+      if (path.includes('/comments')) return { body: [], link: null };
+      if (path.includes('/pulls?')) return { body: [], link: null };
+      return { body: [opts.issue], link: null };
+    },
+    async post(path: string, body: unknown) { opts.posts.push({ path, body }); return true; },
+    async del(path: string) { opts.dels.push(path); return true; },
+  };
+}
+
+test('a claim that died on a prior night is BLOCKED, not released, on the second dead night (#1111)', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const host = await hostApi([{ id: 'dead', task: 'nightly-next', status: 'FAILED' }]);
+  // The prior night's Run claimed #81 and ended without finish/blocked: a ledger entry with no
+  // terminal. Tonight's Run claimed again and died the same way (the claim under judgment).
+  const home = ledgerHome([{ runId: 'run-prior', issue: 81, claimedAt: hoursAgo(26) }]);
+  const claimed = issue({ number: 81, user: { login: 'aywengo' }, labels: [{ name: 'nightly:in-progress' }] });
+  const claimEvent = { event: 'labeled', actor: { login: 'mercury-nightly' }, label: { name: 'nightly:in-progress' }, created_at: new Date().toISOString() };
+  const dels: string[] = [];
+  const posts: { path: string; body: unknown }[] = [];
+  try {
+    const s = await runSelectorWith(
+      blockIo({ issue: claimed, claimEvent, dels, posts }),
+      { REPO: 'aywengo/mercury', MERCURY_API_URL: host.url, MERCURY_API_TOKEN: 't', MERCURY_RUN_ID: 'me', ...home.env },
+      false,
+    );
+    assert.notEqual(s.issue, 81, 'a blocked issue is not handed to a third attempt tonight');
+    // The blocked label landed (the issue stays excluded from every later walk).
+    const labelPost = posts.find((p) => p.path === '/repos/aywengo/mercury/issues/81/labels');
+    assert.ok(labelPost, 'nightly:blocked was applied');
+    assert.deepEqual(labelPost!.body, { labels: ['nightly:blocked'] });
+    // The note comment carries the **Blocking question:** line the report reads back, and names
+    // both dead nights.
+    const notePost = posts.find((p) => p.path === '/repos/aywengo/mercury/issues/81/comments');
+    assert.ok(notePost, 'the note comment was posted');
+    const body = (notePost!.body as { body: string }).body;
+    assert.ok(body.includes('**Blocking question:**'), 'the report\'s Blocked scan finds the question');
+    assert.ok(body.includes('2 nights'), 'both dead nights are named');
+    // And it is NOT a release: no release marker, and the claim removal is the block's own
+    // last write, not the release's first.
+    assert.ok(!body.includes('nightly:claim-released'), 'no release marker');
+    assert.deepEqual(dels, ['/repos/aywengo/mercury/issues/81/labels/nightly%3Ain-progress']);
+  } finally {
+    home.close();
+    host.close();
+  }
+});
+
+test('a prior-night claim that FINISHED is not a dead night: the release path stands (#1111)', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const host = await hostApi([{ id: 'dead', task: 'nightly-next', status: 'FAILED' }]);
+  // The prior night's Run claimed #82 and called finish: one dead night is still one night.
+  const home = ledgerHome([{ runId: 'run-prior', issue: 82, claimedAt: hoursAgo(26), terminal: 'finish', terminalAt: hoursAgo(24) }]);
+  const claimed = issue({ number: 82, user: { login: 'aywengo' }, labels: [{ name: 'nightly:in-progress' }] });
+  const claimEvent = { event: 'labeled', actor: { login: 'mercury-nightly' }, label: { name: 'nightly:in-progress' }, created_at: new Date().toISOString() };
+  const dels: string[] = [];
+  const posts: { path: string; body: unknown }[] = [];
+  try {
+    const s = await runSelectorWith(
+      blockIo({ issue: claimed, claimEvent, dels, posts }),
+      { REPO: 'aywengo/mercury', MERCURY_API_URL: host.url, MERCURY_API_TOKEN: 't', MERCURY_RUN_ID: 'me', ...home.env },
+      false,
+    );
+    assert.equal(s.issue, 82, 'one dead night does not block: the issue is released and re-selectable');
+    // The one label write is the NEW claim (in-progress), never the blocked label.
+    const labelPosts = posts.filter((p) => p.path === '/repos/aywengo/mercury/issues/82/labels');
+    assert.deepEqual(labelPosts.map((p) => p.body), [{ labels: ['nightly:in-progress'] }], 'no blocked label from one dead night');
+    const notePost = posts.find((p) => p.path === '/repos/aywengo/mercury/issues/82/comments');
+    assert.ok(notePost, 'the release is recorded as a comment');
+    assert.ok(((notePost!.body as { body: string }).body).includes('nightly:claim-released'), 'the release marker, not the block note');
+    assert.deepEqual(dels, ['/repos/aywengo/mercury/issues/82/labels/nightly%3Ain-progress']);
+  } finally {
+    home.close();
+    host.close();
+  }
+});
+
+test('--dry-run reports the block without writing it (#1111)', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const host = await hostApi([{ id: 'dead', task: 'nightly-next', status: 'FAILED' }]);
+  const home = ledgerHome([{ runId: 'run-prior', issue: 83, claimedAt: hoursAgo(26) }]);
+  const claimed = issue({ number: 83, user: { login: 'aywengo' }, labels: [{ name: 'nightly:in-progress' }] });
+  const claimEvent = { event: 'labeled', actor: { login: 'mercury-nightly' }, label: { name: 'nightly:in-progress' }, created_at: new Date().toISOString() };
+  const dels: string[] = [];
+  const posts: { path: string; body: unknown }[] = [];
+  try {
+    const s = await runSelectorWith(
+      blockIo({ issue: claimed, claimEvent, dels, posts }),
+      { REPO: 'aywengo/mercury', MERCURY_API_URL: host.url, MERCURY_API_TOKEN: 't', MERCURY_RUN_ID: 'me', ...home.env },
+      true,
+    );
+    assert.notEqual(s.issue, 83, 'the decision is the same in a dry run: the issue stays excluded');
+    assert.deepEqual(dels, [], 'dry-run writes nothing');
+    assert.deepEqual(posts, []);
+  } finally {
+    home.close();
+    host.close();
+  }
 });
