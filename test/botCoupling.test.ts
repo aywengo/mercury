@@ -75,6 +75,17 @@ const ALLOWED_SRC = [
   // the shared contract module (no I/O; the client lives beside it but is NOT allowlisted --
   // bot code asks through the injected DecideClient surface, never imports the client).
   'src/laya/types.ts',
+  // The create-request shape validator (A0-5, #989): `host bot validate` runs every task
+  // template through the SAME validateCreateRequest POST /api/runs uses, imported, never
+  // copied, so a template that would 400 on every fire is caught offline (the #785 gap,
+  // closed for bots). Pinned in src/domain/ like the redactor; the module is pure (no I/O,
+  // no server state) and carries the did-you-mean helper with it.
+  'src/domain/createRequest.ts',
+  'src/domain/suggestKey.ts',
+  // The server-stamped field list (A0-3, #988): a template carrying one would 400 at every
+  // fire, so validateBotTemplates refuses it with the route's own message. Pure constant +
+  // helpers, no I/O.
+  'src/api/serverStampedFields.ts',
 ];
 
 test('the bots directory is non-empty and actually being scanned', () => {

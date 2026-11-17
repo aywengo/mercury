@@ -8,6 +8,7 @@ import { PresetValidationFailure } from '../presets/presetRegistry.ts';
 import type { RunOriginKind, RunStatus } from '../domain/types.ts';
 import { RUN_ORIGIN_KINDS } from '../domain/types.ts';
 import { findServerStampedField, serverStampedFieldMessage } from './serverStampedFields.ts';
+import { validateCreateRequestKeys } from '../domain/createRequest.ts';
 import { isTerminal } from '../domain/stateMachine.ts';
 import { requireAuth } from './auth.ts';
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from '../domain/errors.ts';
@@ -350,6 +351,13 @@ export function createRoutes(deps: RoutesDeps): Router {
       // (issue #988 acceptance 1). See src/api/serverStampedFields.ts.
       const stamped = findServerStampedField(body);
       if (stamped) throw new ValidationError(serverStampedFieldMessage(stamped));
+      // The boundary half of the create-request check (A0-5, #989): a misspelled field is
+      // refused here instead of being ignored and the Run created without it (#785's failure
+      // mode at the body level) -- the route forwards named fields only, so an unknown key is
+      // exactly what RunService.create never sees. The block checks stay with the service's
+      // admission, where they run AFTER the idempotency-replay lookup: a replayed key returns
+      // the original Run and its original record, and the new body's blocks are ignored.
+      validateCreateRequestKeys(body);
       const run = deps.runService.create({
         ownerId: req.auth!.ownerId,
         task: body.task,

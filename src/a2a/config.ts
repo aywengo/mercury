@@ -39,9 +39,12 @@ export const BOT_OWNER_PREFIX = 'bot-';
  * (section 6.2). The caller supplies TEXT and nothing else -- a Run needs a repository, an agent
  * and constraints, and #785 is what happens when one is created without them.
  *
- * In-process here. The on-disk catalog, its per-file validation and its load discipline are A1;
- * this type is the shape that loader has to produce, so the spike cannot be shaped by a convenient
- * shortcut the real loader would not allow.
+ * The template is a create-request body (A0-5, issue #989): every create-request field may be
+ * named, presets and workflows like any other create request. The on-disk catalog loader
+ * (src/a2a/skills.ts) enforces what this type only shows -- the closed field set through the
+ * SAME validateCreateRequest POST /api/runs uses, exactly one `{{input}}` in `task`, and a
+ * `repository` naming a url or localPath -- so a skill that could not create a valid Run never
+ * reaches this type.
  */
 export interface A2aExposedSkill {
   id: string;
@@ -54,8 +57,22 @@ export interface A2aExposedSkill {
   template: {
     task: string;
     repository: RepositoryContext;
+    repositories?: RepositoryContext[];
     agent?: string;
+    skills?: string[];
     constraints?: Partial<RunConstraints>;
+    goal?: unknown;
+    knowledge?: unknown;
+    preset?: { id: string; version?: string };
+    workflow?: { id: string; version?: string };
+    model?: string;
+    /**
+     * The Laya selection record (#854), like any other create-request field. Not shape-checked
+     * by the pure validator (its `chosen` check runs against the RESOLVED agent/model, which
+     * only create() knows); server-load admission and the create call below forward it, so a
+     * record that cannot be trusted is refused there instead of silently dropped.
+     */
+    selection?: unknown;
   };
   /** Rejected above this many characters rather than truncated (section 6.7). */
   inputMaxChars?: number;

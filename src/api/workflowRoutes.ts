@@ -19,6 +19,7 @@ import { Router } from 'express';
 import { requireAuth } from './auth.ts';
 import { sendError, type RoutesDeps } from './routes.ts';
 import { findServerStampedField, serverStampedFieldMessage } from './serverStampedFields.ts';
+import { validateCreateRequestKeys } from '../domain/createRequest.ts';
 import { ValidationError } from '../domain/errors.ts';
 import { WorkflowValidationFailure } from '../workflows/workflowRegistry.ts';
 import { WorkflowPresetResolutionError } from '../workflows/resolveWorkflow.ts';
@@ -137,6 +138,15 @@ export function createWorkflowRoutes(deps: RoutesDeps): Router {
         res.status(400).json({ error: 'preset and workflow are mutually exclusive' });
         return;
       }
+      // A0-5 (#989): the same boundary check POST /api/runs applies (the block checks stay
+      // with RunService.create's admission, which runs them AFTER the idempotency-replay
+      // lookup). This route's body is the create body minus the workflow selection plus the
+      // route-specific `workflowVersion` pin, so the pin is stripped before the check (it is
+      // not a create-request field) and the pin's own type validation still reaches
+      // RunService.create, exactly as before.
+      const createBody = { ...body };
+      delete createBody.workflowVersion;
+      validateCreateRequestKeys(createBody);
       // Forward the pin UNRESOLVED: undefined means "no pin" (head), any supplied value --
       // string or not -- reaches RunService.create's strict workflow validation, so a
       // non-string pin is refused rather than silently unpinned.

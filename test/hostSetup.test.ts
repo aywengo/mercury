@@ -88,6 +88,7 @@ function answers(over: Partial<HostSetupAnswers> = {}): HostSetupAnswers {
     botEnabled: false,
     botAlias: 'maint',
     botHarness: 'primeagent',
+    botRepository: '',
     botPosture: 'scheduler',
     ...over,
   };

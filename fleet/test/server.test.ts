@@ -993,3 +993,48 @@ test('the caller body reaches the child with `model` intact (#824)', async () =>
     await new Promise<void>((r) => child.close(() => r()));
   }
 });
+
+test('a labelled submission strips the fleet routing fields from the child payload (A0-5, #989)', async () => {
+  // `labels` is the fleet's pool filter -- a routing input. The child create request has no
+  // labels key: before #989 the child dropped it silently, and its closed-set check turns a
+  // forward into an unknown-key 400 on every labelled submission. The submit path strips it,
+  // like host and idempotency.
+  const bodies: unknown[] = [];
+  const child = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on('data', (c) => chunks.push(c as Buffer));
+    req.on('end', () => {
+      if (req.method === 'POST' && req.url === '/api/runs') {
+        try { bodies.push(JSON.parse(Buffer.concat(chunks).toString('utf8'))); } catch { bodies.push(null); }
+        res.writeHead(201, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ runId: 'run_1', status: 'QUEUED' }));
+        return;
+      }
+      res.writeHead(404, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: 'nope' }));
+    });
+  });
+  await new Promise<void>((r) => child.listen(0, '127.0.0.1', r));
+  const port = (child.address() as AddressInfo).port;
+  const s = await startService({ apiTokens: `${CALLER_TOKEN}:alice:*` });
+  try {
+    s.db.prepare(
+      `INSERT INTO hosts (id, base_url, credential_ref, enabled, labels, local_paths, agents_cache, added_at, mirror_bodies)
+       VALUES ('live-child', ?, 'lan-ref', 1, '{"pool":"gpu"}', '[]', '["fake"]', ?, 0)`,
+    ).run(`http://127.0.0.1:${port}`, new Date().toISOString());
+    const r = await s.call('POST', '/fleet/runs', {
+      token: CALLER_TOKEN,
+      body: { task: 'x', host: 'live-child', labels: { pool: 'gpu' }, idempotency: 'k-1' },
+    });
+    assert.equal(r.status, 201, JSON.stringify(r.json));
+    assert.equal(bodies.length, 1, 'the child received exactly one submission');
+    const body = bodies[0] as Record<string, unknown>;
+    assert.equal(body.task, 'x');
+    assert.equal((body as any).labels, undefined, 'the pool filter is a routing input, not a child field');
+    assert.equal((body as any).host, undefined, 'fleet-internal fields stay out');
+    assert.equal((body as any).idempotency, undefined, 'the idempotency value travels in the header, not the body');
+  } finally {
+    await s.close();
+    await new Promise<void>((r) => child.close(() => r()));
+  }
+});

@@ -53,6 +53,7 @@ import {
   BOT_POSTURES,
   DEFAULT_BOT_ALIAS,
   botProvisionSummary,
+  existingStarterRepository,
   planBotProvision,
   writeBotProvision,
   type BotPosture,
@@ -96,6 +97,12 @@ export interface HostSetupAnswers {
   botAlias: string;
   /** The harness a starter task names (`agent`); must be one of the enabled `harnesses`. */
   botHarness: string;
+  /**
+   * The repository for the bot's Runs, as typed (a URL or a local path, A0-5 #989). Lands in the
+   * starter template's `repository` — a template without one is refused by `host bot validate`,
+   * so the wizard asks rather than ship a config its own validate rejects.
+   */
+  botRepository: string;
   /** `scheduler` today; `observer`/`brain` land with B2/B3 and are refused. */
   botPosture: BotPosture;
   /**
@@ -216,6 +223,13 @@ export function validateAnswer(key: keyof HostSetupAnswers, value: unknown): str
         ? null
         : `unknown harness '${h}'; known: ${KNOWN_HARNESSES.join(', ')}`;
     }
+    case 'botRepository':
+      // A URL or a local path; both are inert in the bot config JSON (not written to mercury.env,
+      // so no charset gate) — but empty is the #785 form, and the wizard refuses to write it.
+      if (typeof value !== 'string' || value.trim() === '') {
+        return 'bot repository must be a non-empty string (a URL or a local path)';
+      }
+      return null;
     case 'botPosture': {
       if (typeof value !== 'string') return 'bot posture must be a string';
       const posture = value.trim();
@@ -298,7 +312,7 @@ export function validateAnswers(
   for (const key of Object.keys(a) as (keyof HostSetupAnswers)[]) {
     // Bot answers are ignored when the step is off: an operator who skipped the step must not be
     // failed by an empty alias in an answers file that copied the whole schema.
-    if (!a.botEnabled && (key === 'botAlias' || key === 'botHarness' || key === 'botPosture')) continue;
+    if (!a.botEnabled && (key === 'botAlias' || key === 'botHarness' || key === 'botRepository' || key === 'botPosture')) continue;
     const err = validateAnswer(key, a[key]);
     if (err) errors.push(`${key}: ${err}`);
   }
@@ -557,6 +571,10 @@ export function defaultAnswers(env: NodeJS.ProcessEnv = process.env): HostSetupA
     botEnabled: existsSync(botConfigPath(botAlias, env)),
     botAlias,
     botHarness: harnesses[0] ?? '',
+    // Continuity (A0-5 #989): a re-run keeps the repository the existing starter config names —
+    // a fresh host (or a pre-A0-5 config without one) defaults to '', which validateAnswers
+    // refuses when the bot step is on, so the wizard prompts instead of inventing a repository.
+    botRepository: existingStarterRepository(env),
     botPosture: 'scheduler',
   };
 }
@@ -579,6 +597,7 @@ const ANSWERS_FILE_KEYS = [
   'botEnabled',
   'botAlias',
   'botHarness',
+  'botRepository',
   'botPosture',
 ] as const satisfies readonly (keyof HostSetupAnswers)[];
 
@@ -644,6 +663,9 @@ export function readAnswersFile(path: string, env: NodeJS.ProcessEnv = process.e
     botEnabled: parsed.botEnabled ?? base.botEnabled,
     botAlias: parsed.botAlias ?? base.botAlias,
     botHarness: parsed.botHarness ?? base.botHarness,
+    // A non-string passes through so validateAnswers reports the type error (same rule as
+    // botHarness) rather than falling back to the existing-config default.
+    botRepository: parsed.botRepository ?? base.botRepository,
     // A non-string posture passes through so validateAnswers reports the type error (same rule as
     // layaUrl), rather than falling back to 'scheduler' and writing a bot the file did not ask for.
     botPosture: parsed.botPosture ?? base.botPosture,
@@ -718,9 +740,11 @@ export async function promptAnswers(io: {
   let botAlias = base.botAlias;
   let botHarness = base.botHarness;
   let botPosture = base.botPosture;
+  let botRepository = base.botRepository;
   if (botEnabled) {
     botAlias = await q('Bot alias', base.botAlias);
     botHarness = await q('Bot harness (a starter task names it)', base.botHarness);
+    botRepository = await q('Repository for the bot\'s Runs (URL or local path)', base.botRepository);
     botPosture = (await q('Bot posture (scheduler/observer/brain)', base.botPosture)).toLowerCase() as BotPosture;
   }
   return {
@@ -742,6 +766,7 @@ export async function promptAnswers(io: {
     botEnabled,
     botAlias,
     botHarness,
+    botRepository,
     botPosture,
   };
 }
@@ -963,6 +988,7 @@ export async function runHostSetup(
       botPlan = planBotProvision({
         alias: answers.botAlias.trim(),
         harness: answers.botHarness.trim(),
+        repository: answers.botRepository.trim(),
         posture: answers.botPosture,
         env,
         apiTokensRaw: existingVars.MERCURY_API_TOKENS ?? env.MERCURY_API_TOKENS,

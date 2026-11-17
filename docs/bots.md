@@ -56,7 +56,7 @@ not silently disable a configured bot.
 
 ## The config file
 
-One JSON file per bot, named by alias. The starter has one daily task:
+One JSON file per bot, named by alias. The starter has one daily task. Its template names the repository the operator gives the wizard (a URL or a local path, written as the create model's `url` or `localPath`): a template without one would fail at workspace setup on every fire, and `host bot validate` refuses it (A0-5, #989).
 
 ```json
 {
@@ -72,7 +72,8 @@ One JSON file per bot, named by alias. The starter has one daily task:
         "template": {
           "task": "Daily maintenance for {{fire.date}}: review this host's recent Runs ...",
           "agent": "primeagent",
-          "constraints": { "maxDurationMs": 3600000, "maxRetries": 0 }
+          "constraints": { "maxDurationMs": 3600000, "maxRetries": 0 },
+          "repository": { "url": "https://github.com/your-org/your-repo.git" }
         }
       }
     ]

@@ -14,7 +14,20 @@ interface ChildBehaviour {
   failWith?: number;
   statusAfter?: string;
   unreachable?: boolean;
+  /**
+   * Enforce the child's closed-key boundary on POST /api/runs, the way real Mercury does since
+   * #989 (validateCreateRequestKeys runs at the route, before the idempotency replay). A body
+   * with an unknown key is a 400 even on a replayed key.
+   */
+  rejectUnknownKeys?: boolean;
 }
+
+// The child's create-request field set (src/domain/createRequest.ts CREATE_REQUEST_FIELDS),
+// inlined: Fleet -- tests included -- must not import src/.
+const CHILD_CREATE_KEYS = [
+  'task', 'repository', 'repositories', 'agent', 'skills', 'constraints',
+  'goal', 'knowledge', 'preset', 'workflow', 'model', 'selection',
+];
 
 /**
  * A stand-in child that implements the one behaviour Fleet's safety depends on: Idempotency-Key dedupe
@@ -41,6 +54,21 @@ async function fakeChild(behaviour: ChildBehaviour = {}): Promise<{
     req.on('end', () => {
       const key = req.headers['idempotency-key'] as string | undefined;
       if (req.method === 'POST' && req.url === '/api/runs') {
+        let body: unknown = null;
+        try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { body = null; }
+        bodies.push(body);
+        if (behaviour.rejectUnknownKeys) {
+          // The real child's boundary check runs BEFORE the replay lookup, so the order here is
+          // part of the contract being faked, not a detail.
+          const unknown = body !== null && typeof body === 'object' && !Array.isArray(body)
+            ? Object.keys(body as Record<string, unknown>).find((k) => !CHILD_CREATE_KEYS.includes(k))
+            : undefined;
+          if (unknown !== undefined) {
+            res.writeHead(400, { 'content-type': 'application/json' });
+            res.end(JSON.stringify({ error: `create request has unknown key ${JSON.stringify(unknown)}` }));
+            return;
+          }
+        }
         const existing = key ? byKey.get(key) : undefined;
         if (existing) {
           // Dedupe hit: same Run, no new one. This is the branch that prevents a double-spend.
@@ -52,7 +80,6 @@ async function fakeChild(behaviour: ChildBehaviour = {}): Promise<{
         runs.set(id, { id, status });
         if (key) byKey.set(key, id);
         created.push({ key, runId: id });
-        try { bodies.push(JSON.parse(Buffer.concat(chunks).toString('utf8'))); } catch { bodies.push(null); }
         if (behaviour.dropResponse) {
           // The Run exists. The client will never learn its id from this attempt.
           res.destroy();
@@ -153,6 +180,44 @@ test('THE ORPHAN CASE: a lost response yields one child Run, not two', async () 
     assert.equal(h.child.created.length, 1, 'recovery must NOT create a second Run');
     const binding = h.bindings.get(out.binding.fleetRunId)!;
     assert.equal(binding.childRunId, 'run_1', 'recovery found the Run that was already running');
+  } finally { await h.child.close(); h.db.close(); }
+});
+
+test('a pre-upgrade labelled binding recovers to the existing Run, not a 400 orphan (#989 round 2)', async () => {
+  // A binding stored before the routing-field strip can still carry `labels` in its stored
+  // `requested`. The original submission created the child's Run (the answer was lost), and
+  // recovery re-sends the stored payload. The child's closed-key check refuses `labels`, so an
+  // unstripped resend is a 400 that recoverPending answers by DISCARDING the binding --
+  // orphaning the very Run the original submission created.
+  const fleetRunId = 'fr_00000000000000000000000000000001';
+  const h = await harness({ rejectUnknownKeys: true });
+  try {
+    h.bindings.createPending({
+      fleetRunId,
+      hostId: 'studio',
+      ownerId: 'alice',
+      requested: { task: 'expensive task', labels: { pool: 'gpu' } },
+      clientToken: null,
+    });
+    // The original submission reached the child: a Run exists under the idempotency key
+    // recovery will reuse (fleetRunId).
+    const pre = await fetch(`${h.child.url}/api/runs`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'idempotency-key': fleetRunId },
+      body: JSON.stringify({ task: 'expensive task' }),
+    });
+    assert.equal(pre.status, 201, 'the pre-existing child Run must have been created');
+
+    const rec = await recoverPending(h.dispatch);
+    assert.equal(rec.resolved, 1, 'recovery must resolve the labelled binding, not discard it');
+    assert.equal(rec.stillPending, 0);
+    const binding = h.bindings.get(fleetRunId);
+    assert.ok(binding, 'discarding the binding is how the Run becomes an orphan');
+    assert.equal(binding!.childRunId, 'run_1', 'recovery must find the Run that already exists');
+    assert.ok(
+      !h.child.bodies.some((b) => b !== null && typeof b === 'object' && !Array.isArray(b) && 'labels' in (b as object)),
+      'the re-sent payload must not carry the routing fields the child now refuses',
+    );
   } finally { await h.child.close(); h.db.close(); }
 });
 

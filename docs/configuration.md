@@ -437,8 +437,23 @@ request fields, `task` required). Validate offline:
 mercury host bot validate --alias <a>
 ```
 
-The command checks the config, the credentials file, and the two-copy token
-agreement; it makes no network calls and never prints a token value.
+The command checks the config, every task template, the credentials file, and
+the two-copy token agreement; it makes no network calls and never prints a
+token value.
+
+Each task template is validated as the scheduler will post it: resolved at the
+task's next scheduled fire (the `{{fire.*}}` placeholders filled, `notAfterAt`
+becoming `constraints.notAfter` on that fire's date, the dispatch-time
+`botTask` hint and constraint defaults applied), then run through the same
+create-request validator `POST /api/runs` uses — a template that would 400 on
+every fire (a misspelled create-request field, a `constraints` typo, a
+deadline earlier than its own first fire) is a `template FAIL` finding, not a
+failed night (#785's failure class, closed at validate time). The validator
+also requires the template to name a `repository` with a `url` or
+`localPath`: a Run without one fails at workspace setup, so for a template
+that is a validate finding. A schedule that cannot fire within 24h cannot be
+resolved at a real fire: its deadline check is reported as a `template warn`,
+not a refusal.
 
 The bot's API token lives in two deliberate places (§4.2): the server side of
 `MERCURY_API_TOKENS` (as `tok-bot-<alias>:bot-<alias>`), and the bot's own
@@ -495,6 +510,47 @@ bot's Runs remain in the database but become readable only to an admin or
 observer token once the owner's token is gone. Without `--yes` it prints the
 plan and writes nothing. `--reassign-runs <owner>` is refused until the
 owner-transfer API exists (#760).
+
+## A2A exposed skills
+
+The A2A boundary ([a2a-design.md](a2a-design.md) §6) is off unless the operator
+enables it AND at least one exposed skill is declared. The catalog is one JSON
+file per skill:
+
+```text
+${XDG_CONFIG_HOME:-~/.config}/mercury/a2a/skills/<skill-id>.json
+```
+
+The id is the file name and obeys the bot-alias discipline
+(`^[a-z][a-z0-9-]{0,31}$`). The file carries a closed key set — `name`,
+`description`, `owners`, `template`, `inputMaxChars` (default 8000, hard
+ceiling 100000) — and is validated the same way bot configs are: unknown keys
+refused with a did-you-mean suggestion, one bad file reported without taking
+the others down. `owners` is a non-empty list of owner ids; `*` and
+`bot-<alias>` ids are refused (sections 2 and 6.3). `template` is a
+create-request body whose `task` carries exactly one `{{input}}` slot, and it
+must name a `repository` with a `url` or `localPath` — a Run without one fails
+at workspace setup, so a template that would create one is refused, not
+loaded (#785's rule). The full template, with a placeholder input substituted,
+goes through the same create-request validator `POST /api/runs` uses; a
+template carrying a server-stamped field (`ownerId`, `status`, …) is refused
+with the route's message.
+
+Validate the catalog offline (no API call, no database, no Run created; exit
+1 on any invalid file):
+
+```bash
+mercury host a2a validate [--skill <id>]
+```
+
+The checks that need server state (agent registered, preset/workflow
+resolvable, the capability matrices, the credential profile) run at server
+load, when the server mounts the A2A surface: each skill's template goes
+through the same creation admission `RunService.create` uses, with a
+placeholder input, and a skill that cannot create a valid Run is not exposed
+and is reported (a credential-profile refusal for one of the skill's owners
+is per-caller and noted, not hidden). If every skill is refused, the A2A
+surface is not mounted at all.
 
 ## Laya sidecar
 

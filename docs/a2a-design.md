@@ -190,6 +190,18 @@ Rules:
   the extension gets `ExtensionSupportRequiredError`. Inferring the skill from free text
   is rejected: that would be a model deciding which repository an outsider's text runs
   against.
+- **Load-time validation (A0-5, #989).** The catalog loader is the offline half of this
+  section: id discipline, the closed key set (`name`, `description`, `owners`,
+  `template`, `inputMaxChars` — default 8000, hard ceiling 100000), `owners` without
+  `*` or `bot-<alias>`, exactly one `{{input}}` slot, and no server-stamped field in the
+  template. The template, with a placeholder input substituted, runs through the same
+  `validateCreateRequest` `POST /api/runs` uses, with the added requirement that
+  `repository` name a `url` or `localPath`. `mercury host a2a validate [--skill <id>]`
+  runs the same loader offline (exit 1 on any invalid file). The server-state checks
+  (agent registered, preset/workflow resolvable) run at server load through the same
+  code `RunService.create` uses; a skill failing either is not exposed and is reported.
+  A skill that cannot create a valid Run never appears on a card — the #785 rule,
+  enforced at load.
 
 ### 6.3 Identity and authorization
 

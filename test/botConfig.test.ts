@@ -5,10 +5,11 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, writeFileSync, chmodSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdirSync, readFileSync, writeFileSync, chmodSync, rmSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { tempDir } from './helpers.ts';
-import { loadBotConfig, botConfigPath } from '../src/host/bots/config.ts';
+import { loadBotConfig, botConfigPath, validateBotTemplates } from '../src/host/bots/config.ts';
 import { botOwnerId } from '../src/host/bots/keys.ts';
 import { botCredentialsPath, readBotCredentials, registeredOwnerForToken } from '../src/host/bots/credentials.ts';
 
@@ -279,4 +280,194 @@ test('two-copy agreement: drifted copies are reported, agreeing copies resolve t
   assert.throws(() => registeredOwnerForToken('tok-1', 'tok-1'), /entry 0 must be exactly 'token:owner'.*no colon/);
   assert.throws(() => registeredOwnerForToken('tok-1', 'tok-1:'), /entry 0 must be exactly 'token:owner'.*empty owner half/);
   assert.throws(() => registeredOwnerForToken('tok-1', 'a:b:c'), /entry 0 must be exactly 'token:owner'.*2 colons/);
+});
+
+
+// -- Task template validation (A0-5, #989, acceptance 3) -------------------------------
+//
+// `host bot validate` runs every task template through the SAME validateCreateRequest
+// POST /api/runs uses, as the scheduler will POST it: resolved at the task's next scheduled
+// fire, with the dispatch-time constraint additions. deploy/nightly-bot.json.example must
+// still pass; a template without a repository must fail it (the #785 gap, closed for bots).
+
+const EXAMPLE_PATH = join(dirname(fileURLToPath(import.meta.url)), '..', 'deploy', 'nightly-bot.json.example');
+
+function templateBot(template: Record<string, unknown>, cron = '*/20 * * * *'): Record<string, unknown> {
+  return {
+    schedule: {
+      tasks: [
+        { name: 'the-task', cron, tz: 'UTC', singleFlight: true, onMiss: 'skip', template },
+      ],
+    },
+  };
+}
+
+test('acceptance 3: the shipped nightly example still passes template validation', () => {
+  const { env, cleanup } = withBots({ nightly: JSON.parse(readFileSync(EXAMPLE_PATH, 'utf8')) });
+  try {
+    const cfg = loadBotConfig('nightly', env);
+    const result = validateBotTemplates(cfg);
+    assert.deepEqual(result.findings, []);
+    assert.deepEqual(result.warnings, []);
+    assert.deepEqual(result.ok, ['nightly-e2e', 'nightly-next', 'nightly-report']);
+  } finally {
+    cleanup();
+  }
+});
+
+test('acceptance 3: a bot template without a repository now fails it', () => {
+  const { env, cleanup } = withBots({ norepo: templateBot({ task: 'do the thing', constraints: { maxDurationMs: 3600000 } }) });
+  try {
+    const result = validateBotTemplates(loadBotConfig('norepo', env));
+    assert.equal(result.ok.length, 0);
+    assert.equal(result.findings.length, 1);
+    assert.match(result.findings[0]!, /schedule\.tasks\[the-task\]\.template/);
+    assert.match(result.findings[0]!, /must name a repository \(url or localPath\); a Run without one fails at workspace setup \(#785\)/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('an empty repository object fails: it is the create surface\'s "no repository" form, not a checkout', () => {
+  const { env, cleanup } = withBots({ emptyrepo: templateBot({ task: 'do the thing', repository: {} }) });
+  try {
+    const result = validateBotTemplates(loadBotConfig('emptyrepo', env));
+    assert.match(result.findings[0]!, /must name a repository with a url or localPath/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('an unknown create-request key in a template fails with a suggestion', () => {
+  const { env, cleanup } = withBots({ badkey: templateBot({ task: 'do the thing', repository: { url: 'https://github.com/aywengo/mercury.git' }, consraints: { maxDurationMs: 3600000 } }) });
+  try {
+    const result = validateBotTemplates(loadBotConfig('badkey', env));
+    assert.match(result.findings[0]!, /unknown key "consraints" \(did you mean 'constraints'\?\)/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('an invalid constraint in a template fails through the shared validator', () => {
+  const { env, cleanup } = withBots({ badconstraint: templateBot({ task: 'do the thing', repository: { url: 'https://github.com/aywengo/mercury.git' }, constraints: { maxDurationMs: -1 } }) });
+  try {
+    const result = validateBotTemplates(loadBotConfig('badconstraint', env));
+    assert.match(result.findings[0]!, /constraint maxDurationMs must be >= 0/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('a notAfter already in the past fails with the creation-time message', () => {
+  const { env, cleanup } = withBots({ pastdeadline: templateBot({ task: 'do the thing', repository: { url: 'https://github.com/aywengo/mercury.git' }, constraints: { notAfter: '2020-01-01T00:00:00Z' } }) });
+  try {
+    const result = validateBotTemplates(loadBotConfig('pastdeadline', env));
+    assert.match(result.findings[0]!, /constraint notAfter must be in the future/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('a deadline between now and the fire\'s own instant fails: it would 400 on every fire', () => {
+  // The deadline is the fire's OWN wall-clock minute: in the future at creation (the shared
+  // validator passes it) yet not after the first dispatch, where the server refuses a notAfter
+  // that predates the creation instant. That is the #785 class one level down: a template that
+  // 400s on every fire. The clock is simulated (midday) and the schedule fires daily at 04:00,
+  // so the next fire is a fixed ~16h ahead on the REAL calendar and the deadline's date cannot
+  // roll under the real clock: the old fixture derived notAfterAt from now+1min on a */20 cron,
+  // and in the day's last cron window (23:40-24:00) the fire's date rolled to the next day
+  // while the minute did not, so the check passed and the test failed (23:41 UTC).
+  const simulatedNow = new Date();
+  simulatedNow.setUTCHours(12, 0, 0, 0);
+  const { env, cleanup } = withBots({ earlydeadline: templateBot({ task: 'do the thing', repository: { url: 'https://github.com/aywengo/mercury.git' }, notAfterAt: '04:00' }, '0 4 * * *') });
+  try {
+    const result = validateBotTemplates(loadBotConfig('earlydeadline', env), simulatedNow.getTime());
+    assert.equal(result.ok.length, 0);
+    assert.match(result.findings[0]!, /notAfter .+ is in the past at the task's fire time/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('a template that cannot be resolved is a finding, and later tasks are still checked (Copilot review of this PR)', () => {
+  // notAfterAt: 'tomorrow' passes loadBotConfig (the template is untyped) but resolveTemplate
+  // throws on its 'HH:MM' check. The scheduler records that failure per fire and keeps going,
+  // so validate must do the same: a task-qualified finding, never an abort that skips the
+  // remaining tasks and the command's own credential checks.
+  const cfg = {
+    schedule: {
+      tasks: [
+        { name: 'broken', cron: '*/20 * * * *', tz: 'UTC', singleFlight: true, onMiss: 'skip',
+          template: { task: 'do the thing', repository: { url: 'https://github.com/aywengo/mercury.git' }, notAfterAt: 'tomorrow' } },
+        { name: 'fine', cron: '*/20 * * * *', tz: 'UTC', singleFlight: true, onMiss: 'skip',
+          template: { task: 'do the other thing', repository: { url: 'https://github.com/aywengo/mercury.git' } } },
+      ],
+    },
+  };
+  const { env, cleanup } = withBots({ badresolve: cfg });
+  try {
+    const result = validateBotTemplates(loadBotConfig('badresolve', env));
+    assert.deepEqual(result.ok, ['fine']);
+    assert.equal(result.findings.length, 1);
+    assert.match(result.findings[0]!, /schedule\.tasks\[broken\]\.template: notAfterAt must be 'HH:MM', got 'tomorrow'/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('a fleet-via template may name the routing fields host and labels (Copilot review of this PR)', () => {
+  // api.via: "fleet" (fleet-bots-design.md section 4): the fleet submit handler consumes
+  // host/labels before dispatch and strips them from the child payload, so they are NOT
+  // create-request fields and must not fail the shared check. A malformed value is a finding,
+  // and on the host path the same fields remain unknown-key refusals.
+  const fleetBot = (template: Record<string, unknown>) => ({
+    api: { url: 'http://127.0.0.1:4100', via: 'fleet' },
+    schedule: { tasks: [{ name: 'the-task', cron: '*/20 * * * *', tz: 'UTC', singleFlight: true, onMiss: 'skip', template }] },
+  });
+  const { env, cleanup } = withBots({
+    fleetok: fleetBot({ task: 'do the thing', repository: { url: 'https://github.com/aywengo/mercury.git' }, host: 'worker-2', labels: { pool: 'gpu' } }),
+    fleethost: fleetBot({ task: 'do the thing', repository: { url: 'https://github.com/aywengo/mercury.git' }, host: 42 }),
+    fleetlabels: fleetBot({ task: 'do the thing', repository: { url: 'https://github.com/aywengo/mercury.git' }, labels: 'gpu' }),
+    hostpath: templateBot({ task: 'do the thing', repository: { url: 'https://github.com/aywengo/mercury.git' }, host: 'worker-2' }),
+  }, { json: { fleetok: { api: 'tapi-1', fleet: 'tfleet-1' }, fleethost: { api: 'tapi-2', fleet: 'tfleet-2' }, fleetlabels: { api: 'tapi-3', fleet: 'tfleet-3' } } });
+  try {
+    const ok = validateBotTemplates(loadBotConfig('fleetok', env));
+    assert.deepEqual(ok.findings, []);
+    assert.deepEqual(ok.ok, ['the-task']);
+    const host = validateBotTemplates(loadBotConfig('fleethost', env));
+    assert.equal(host.findings.length, 1);
+    assert.match(host.findings[0]!, /host must be a non-empty string when present/);
+    const labels = validateBotTemplates(loadBotConfig('fleetlabels', env));
+    assert.equal(labels.findings.length, 1);
+    assert.match(labels.findings[0]!, /labels must be an object of string values when present/);
+    // The host path posts the body as-is to /api/runs: the routing field is an unknown key there.
+    const hp = validateBotTemplates(loadBotConfig('hostpath', env));
+    assert.equal(hp.findings.length, 1);
+    assert.match(hp.findings[0]!, /unknown key "host"/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('a schedule that never fires within 24h warns, not refuses', () => {
+  const { env, cleanup } = withBots({ never: templateBot({ task: 'do the thing', repository: { url: 'https://github.com/aywengo/mercury.git' }, notAfterAt: '06:00' }, '0 0 31 2 *') });
+  try {
+    const result = validateBotTemplates(loadBotConfig('never', env));
+    assert.deepEqual(result.findings, []);
+    assert.deepEqual(result.ok, ['the-task']);
+    assert.equal(result.warnings.length, 1);
+    assert.match(result.warnings[0]!, /no fire within 24h; notAfterAt not checked/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('a server-stamped field in a template fails with the route message', () => {
+  const { env, cleanup } = withBots({ stamped: templateBot({ task: 'do the thing', repository: { url: 'https://github.com/aywengo/mercury.git' }, ownerId: 'alice' }) });
+  try {
+    const result = validateBotTemplates(loadBotConfig('stamped', env));
+    assert.match(result.findings[0]!, /ownerId is set by the server and cannot be supplied in a request body/);
+  } finally {
+    cleanup();
+  }
 });

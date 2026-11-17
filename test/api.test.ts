@@ -219,6 +219,47 @@ test('idempotency-key returns same run (#730, B0-2 contract)', async () => {
   }
 });
 
+test('idempotency replay answers the original Run even when the replay body has an invalid block (A0-5, #989)', async () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const { app, close: closeStream } = makeApi(env);
+    const srv = await listen(app);
+    try {
+      const base = `http://127.0.0.1:${srv.port}`;
+      const headers = { authorization: 'Bearer tok-alice', 'content-type': 'application/json', 'idempotency-key': 'k-blocks' };
+      const r1 = await fetch(`${base}/api/runs`, { method: 'POST', headers, body: JSON.stringify({ task: 'x', agent: 'fake' }) });
+      assert.equal(r1.status, 201);
+      const j1 = (await r1.json()) as { runId: string };
+      // A replay whose goal block is invalid: the replay check answers FIRST, so the original
+      // Run comes back and the replayed block is ignored -- the rule
+      // selection/goal/knowledge/preset/workflow always followed. A route-level FULL shape
+      // check would 400 this before the service could replay (Copilot review of this PR).
+      const r2 = await fetch(`${base}/api/runs`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ task: 'x', agent: 'fake', goal: 'bad' }),
+      });
+      assert.equal(r2.status, 201);
+      const j2 = (await r2.json()) as { runId: string };
+      assert.equal(j2.runId, j1.runId);
+      // A FRESH create with the same invalid block is still refused, with the block named.
+      const r3 = await fetch(`${base}/api/runs`, {
+        method: 'POST',
+        headers: { authorization: 'Bearer tok-alice', 'content-type': 'application/json' },
+        body: JSON.stringify({ task: 'x', agent: 'fake', goal: 'bad' }),
+      });
+      assert.equal(r3.status, 400);
+      const j3 = (await r3.json()) as { error: string };
+      assert.match(j3.error, /goal must be an object/);
+    } finally {
+      await srv.close();
+      closeStream();
+    }
+  } finally {
+    env.close();
+  }
+});
+
 test('idempotency-key absent -> every POST creates a Run (#730, B0-2 contract)', async () => {
   const env = makeEnv({ workerEnabled: false });
   try {
@@ -775,6 +816,30 @@ test('cancelling a terminal run is 409, and a bad payload is still 400 (issue #6
         method: 'POST', headers: auth, body: JSON.stringify({ task: '   ', agent: 'fake' }),
       });
       assert.equal(bad.status, 400);
+      assert.match(((await bad.json()) as { error: string }).error, /task is required/);
+    } finally {
+      await srv.close(); closeStream();
+    }
+  } finally {
+    env.close();
+  }
+});
+
+test('a non-string task is 400 `task is required`, not a 500, on POST /api/runs (#989 round 2)', async () => {
+  // The key check lets `{"task":123}` through the boundary (123 is a known key); without the
+  // type guard in admitCreateRequest's pre-replay check the .trim() throws a TypeError and the
+  // route answers 500 while the offline validator says `task is required`.
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const { app, close: closeStream } = makeApi(env);
+    const srv = await listen(app);
+    try {
+      const base = `http://127.0.0.1:${srv.port}`;
+      const auth = { authorization: 'Bearer tok-alice', 'content-type': 'application/json' };
+      const bad = await fetch(`${base}/api/runs`, {
+        method: 'POST', headers: auth, body: JSON.stringify({ task: 123, agent: 'fake' }),
+      });
+      assert.equal(bad.status, 400, 'a non-string task is a client error, not a server error');
       assert.match(((await bad.json()) as { error: string }).error, /task is required/);
     } finally {
       await srv.close(); closeStream();
