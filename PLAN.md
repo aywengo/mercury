@@ -125,7 +125,7 @@ Record: [`docs/crew/roadmap.md`](docs/crew/roadmap.md)
 | #874 | Crew Phase 7: owner drafts and publishing — namespaced drafts, quotas, try-draft untrus… | open | — |
 | #871 | Crew Phase 9: linear staged workflows — coordinator, commit handoff, run-completed gate… | open | — |
 | #872 | Crew Phase 10: advanced gates and bounded loops — tests-pass and manual-approval gates,… | open | — |
-| #868 | Crew Phase 11 CP-1: CI schema linting for builtin preset and workflow manifests (operat… | open | — |
+| #868 | Crew Phase 11 CP-1: CI schema linting for builtin preset and workflow manifests (operat… | done | #1117 |
 | #869 | Crew Phase 11 CP-2: operator health endpoints, bounded-cardinality metrics, alerts, and… | open | — |
 
 ## Teams
