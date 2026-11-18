@@ -301,8 +301,8 @@ enough to enforce.
    dispatch; change nothing.
 2. **Label**: join `selection` with the Run's outcome from the event store —
    terminal state, retries, duration, whether its PR was approved/merged (nightly).
-   A pick counts as "good" by a rule written down before looking at the data
-   (§12), not tuned afterwards.
+   A pick counts as "good" by the rule in §9.1, written down before looking at the
+   data, not tuned afterwards.
 3. **Fine-tune** (L3): upstream notebook, on Mercury's own rows; fit calibration
    temperatures on a held-out split; publish the checkpoint revision the host
    will pin.
@@ -312,6 +312,75 @@ enough to enforce.
 
 The threshold is a policy chosen from measured accuracy at that coverage, not a
 property of the model; there is intentionally no shipped default for `enforce`.
+
+### 9.1 Label rule
+
+Decided 2026-11-03, before any shadow data was examined and before L1-4 (#857) merged
+(#853). Changing it after L3 data has been looked at requires a new dated entry in §15
+that says what was seen first.
+
+**Unit.** One row per *dispatch*: a Run with a `selection` record from a scheduled bot
+fire, plus its `retryOf` chain. The label belongs to the original Run; retries count
+against it, they are not rows of their own.
+
+**Labels.** Every row gets exactly one of `good`, `bad` or `unlabelled`. Only `good` and
+`bad` rows are used for accuracy; `unlabelled` rows still count toward coverage.
+
+**Outcome signal, in precedence order** (the first rule that matches decides):
+
+1. Excluded (below) -> not a row at all.
+2. The chain ends `FAILED` with `errorKind` `agent` or `task`, or `TIMED_OUT` -> `bad`.
+3. The Run opened a PR and that PR was closed without merging -> `bad`.
+4. The chain ends `COMPLETED` on the first attempt (no retry), and either it opened no PR
+   or its PR was merged or approved by the owner -> `good`.
+5. The chain ends `COMPLETED` only after one or more retries -> `unlabelled`.
+6. The Run's PR is still open, with no owner approval, 7 days after the Run's terminal
+   transition -> `unlabelled`.
+
+A label is final 7 days after the terminal transition and is never revised afterwards.
+Duration and retry count are recorded next to the label as secondary measures, but
+they do not decide it: duration varies with the task, not only with the pick. Cost stays out
+until it is measured per harness.
+
+**What shadow data can and cannot say.** In shadow mode only the template default ran,
+so a shadow label grades the default, never Laya's pick. Shadow rows support exactly:
+
+- *agreement rows* (Laya's pick equals the default): the label is direct evidence for
+  the pick as well;
+- *discrimination*: whether Laya disagrees with the default more often on `bad` rows than
+  on `good` ones, and whether its `answerConfidence` in the default is lower on `bad`
+  rows. This shows whether the model can tell a bad default from a good one. It does not
+  show that its alternative would have done better.
+
+"The pick beats the default" (§9 step 4) needs a trial in which the pick actually runs.
+L3 runs it per template as an **interleaved enforce trial**: on dispatches where the pick
+differs from the default and clears `minConfidence`, run the pick or the default with
+equal probability, assigned deterministically from the Run id, and label both arms by
+this same rule.
+
+**Held-out split and L3 acceptance.**
+
+- Split by time, not at random: the most recent 20% of labelled shadow rows per template
+  are held out, frozen when L3 fine-tuning starts and never used for training or
+  calibration. Calibration temperatures are fitted on a 10% slice of the training
+  portion.
+- Offline gate, on the held-out rows: the fine-tuned model must beat the base checkpoint's
+  discrimination (above) before any trial starts.
+- Enforce gate, from the interleaved trial: at the chosen `minConfidence`, with coverage of
+  at least 30% of the template's dispatches, at least 40 labelled rows per arm, and a pick
+  `good` rate higher than the default's in a one-sided two-proportion test at p < 0.05.
+  Short of that, `enforce` stays refused for the template, as §13 L3 already requires.
+
+**Excluded rows** (never labelled, never counted):
+
+- manual fires (idempotency key prefixed `manual-`, dispatcher §11);
+- Runs cancelled by an operator (`CANCELLED`);
+- infrastructure failures: a terminal `errorKind: infrastructure` anywhere in the chain,
+  including `run.failed` with a harness-unavailable cause;
+- Runs stopped by a dispatch window's `notAfter` end (a schedule outcome, not a quality
+  outcome);
+- dispatches where the selection fell back because the sidecar was unavailable or answered
+  invalidly: there is no pick to grade. They count toward the coverage denominator only.
 
 ## 10. Configuration reference
 
@@ -354,8 +423,7 @@ wire shape against the pinned upstream version.
 
 ## 12. Open decisions
 
-1. **Label rule for "good selection"** (§9 step 2) — must be written before L3
-   data is examined.
+1. ~~**Label rule for "good selection"**~~ — decided in §9.1 (2026-11-03, #853).
 2. **Checkpoint**: `english` vs `typed-decisions` as the base for fine-tuning.
 3. **In-process TS runtime** (`laya-ts`, ONNX) vs sidecar — revisit only if the
    sidecar's operational cost proves real.
@@ -419,7 +487,7 @@ placement unchanged in shadow; counterfactual host logged.
 
 ### L3 — fine-tune and enforce
 
-Label rule decided (§12.1), fine-tuned checkpoint pinned, comparison recorded
+Label rule decided (§9.1), fine-tuned checkpoint pinned, comparison recorded
 here, `enforce` enabled per template. *Acceptance*: held-out comparison beats the
 literal default at the chosen threshold; `enforce` refused on any template
 without a recorded comparison.
@@ -436,6 +504,13 @@ without a recorded comparison.
 - [`host-installer.md`](host-installer.md)
 
 ## 15. Revision history
+
+### 2026-11-03 — label rule decided (L1-0)
+
+§9.1 added: the "good selection" label rule, which comparisons shadow data can and cannot support,
+the interleaved enforce trial, the held-out split, the L3 acceptance gate and the exclusions.
+§12.1 marked decided. Written before L1-4 (#857) merged and before any shadow row was examined
+(#853).
 
 ### 2026-10-10 — status: L1 in progress
 
