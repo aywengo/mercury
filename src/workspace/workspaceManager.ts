@@ -50,6 +50,9 @@ const GIT_NETWORK_TIMEOUT_MS = 600_000;
 export interface GitRunOptions {
   cwd?: string;
   timeoutMs?: number;
+  /** Extra environment for this invocation only (the Run's credential profile, #1111).
+   *  Merged OVER the no-prompt guard block, so GIT_TERMINAL_PROMPT=0 and friends still hold. */
+  env?: Record<string, string>;
 }
 
 /**
@@ -63,7 +66,7 @@ export async function runGit(args: string[], opts: GitRunOptions = {}): Promise<
   try {
     return await execFileP('git', args, {
       cwd: opts.cwd,
-      env: GIT_ENV,
+      env: opts.env ? { ...GIT_ENV, ...opts.env } : GIT_ENV,
       timeout,
       // SIGKILL so the deadline cannot be negotiated. git handles SIGTERM, and a child that is
       // willing to shut down cleanly may still take time to do it; the worker's own shutdown has a
@@ -127,9 +130,10 @@ export class WorkspaceManager {
   }
 
   /** Applies this manager's configured deadlines. `network: true` for clone/fetch. */
-  private git(args: string[], opts: { cwd?: string; network?: boolean } = {}): Promise<{ stdout: string; stderr: string }> {
+  private git(args: string[], opts: { cwd?: string; network?: boolean; env?: Record<string, string> } = {}): Promise<{ stdout: string; stderr: string }> {
     return runGit(args, {
       cwd: opts.cwd,
+      env: opts.env,
       timeoutMs: opts.network
         ? this.cfg.gitNetworkTimeoutMs ?? GIT_NETWORK_TIMEOUT_MS
         : this.cfg.gitTimeoutMs ?? GIT_DEFAULT_TIMEOUT_MS,
@@ -355,6 +359,27 @@ export class WorkspaceManager {
       // An unreadable repository reports nothing rather than everything: a false "you forgot to
       // push" on every Run is worse than a missed one, and the Run itself is already final.
       return none;
+    }
+  }
+
+  /**
+   * Best-effort push of the worktree's HEAD to the `origin` remote under `branch` (#1111): a
+   * Run stopped by its deadline must not strand committed work in the worktree, so the worker
+   * pushes the branch with the Run's OWN credentials (`env` is the profile environment the
+   * worker built for this Run, same four layers as at drive time) before finalizing.
+   *
+   * Returns true only when the push succeeded. Every other outcome -- no credential profile,
+   * authentication refused, the remote gone, the network dead -- is a false, never an error:
+   * this runs on the finalize path, where a throw would lose the terminal state, and the caller
+   * records the stranded branch in `run.unpushed_commits` instead. Bounded by the network git
+   * timeout, so a dead remote cannot hang the worker.
+   */
+  async pushBranch(workspacePath: string, branch: string, env: Record<string, string>): Promise<boolean> {
+    try {
+      await this.git(['-C', workspacePath, 'push', 'origin', `HEAD:refs/heads/${branch}`], { network: true, env });
+      return true;
+    } catch {
+      return false;
     }
   }
 
