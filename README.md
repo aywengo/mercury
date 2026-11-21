@@ -1,3 +1,9 @@
+> **Archived — use Orca.dev bots instead**
+>
+> Mercury is archived. For agent-bot workflows, use [Orca.dev](https://github.com/stablyai/orca), starting with [v1.4.268](https://github.com/stablyai/orca/releases/tag/v1.4.268). That release adds bot support for Cursor, GitHub Copilot, and Hermes, along with Slack integration improvements. These capabilities cover the direction this project was intended to implement; new work should go to Orca.dev rather than Mercury.
+
+---
+
 # Mercury
 
 <p align="center">
